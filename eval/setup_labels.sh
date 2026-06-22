@@ -9,4 +9,12 @@ for k in "${!C[@]}"; do
   gh label create "eval:$k" -R "$REPO" --color "${C[$k]}" \
      --description "sparkinfer auto-eval verdict: $k" --force >/dev/null
 done
-echo "eval:* labels ready on $REPO"
+
+# subsystem / emission-weight labels — assigned deterministically from changed paths (no AI)
+declare -A AC=( [kernels]=006B75 [runtime]=0052CC [moe]=8250DF [bench]=C2E0C6 )
+declare -A AW=( [kernels]=0.42 [runtime]=0.26 [moe]=0.21 [bench]=0.11 )
+for k in "${!AC[@]}"; do
+  gh label create "area:$k" -R "$REPO" --color "${AC[$k]}" \
+     --description "subsystem (emission weight ${AW[$k]})" --force >/dev/null
+done
+echo "eval:* and area:* labels ready on $REPO"

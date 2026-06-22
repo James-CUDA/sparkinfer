@@ -74,8 +74,10 @@ llama.cpp), benchmarks **decode speed**, and posts a comment with an **`eval:<la
 | `BASELINE` | first verified entry; establishes the frontier |
 
 The label is a **deterministic function of the measurements**, so it's reproducible across
-validators. The bot **never merges** — merging is manual after review. Runs the same evaluator
-you can run yourself: [`eval/`](eval) (`vast_eval.py`, `pr_eval_bot.py`).
+validators. The bot also tags the PR's **subsystem** — `area:kernels` / `runtime` / `moe` /
+`bench` — from its changed paths (which decides the emission weight; also deterministic, no AI).
+The bot **never merges** — merging is manual after review. Runs the same evaluator you can run
+yourself: [`eval/`](eval) (`vast_eval.py`, `pr_eval_bot.py`).
 
 ## License
 

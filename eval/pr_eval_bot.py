@@ -18,6 +18,10 @@ import argparse, json, os, re, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+# subsystem -> emission weight. The label area:<name> is assigned from a PR's changed file
+# paths (top-level dir) — purely deterministic, no AI.
+AREAS = {"kernels": 0.42, "runtime": 0.26, "moe": 0.21, "bench": 0.11}
+
 def gh(args):
     return subprocess.run(["gh"] + args, capture_output=True, text=True)
 
@@ -28,6 +32,18 @@ def evaluated_commits(repo, num):
         for m in re.finditer(r"<!-- sparkinfer-eval:([0-9a-f]+) -->", c.get("body", "")):
             done.add(m.group(1))
     return done
+
+def areas_for_pr(repo, num):
+    """Subsystems a PR touches, from its changed file paths (deterministic, no AI)."""
+    files = json.loads(gh(["pr", "view", str(num), "-R", repo, "--json", "files"]).stdout or "{}").get("files", [])
+    return {f["path"].split("/", 1)[0] for f in files} & set(AREAS)
+
+def apply_area_labels(repo, num, areas):
+    want = {f"area:{a}" for a in areas}
+    have = {l["name"] for l in json.loads(gh(["pr", "view", str(num), "-R", repo, "--json", "labels"]).stdout)["labels"]
+            if l["name"].startswith("area:")}
+    for lab in want - have: gh(["pr", "edit", str(num), "-R", repo, "--add-label", lab])
+    for lab in have - want: gh(["pr", "edit", str(num), "-R", repo, "--remove-label", lab])
 
 def render(res, oid):
     label = res.get("label", "?")
@@ -64,8 +80,11 @@ def main():
         print("no open PRs"); return
     for pr in prs:
         num, branch, oid = pr["number"], pr["headRefName"], pr["headRefOid"][:7]
+        areas = areas_for_pr(args.repo, num)                       # deterministic, cheap, every poll
+        print(f"PR #{num} @ {oid}: areas={sorted(areas) or ['(none)']}")
+        if not args.dry_run: apply_area_labels(args.repo, num, areas)
         if oid in evaluated_commits(args.repo, num):
-            print(f"PR #{num} @ {oid}: already evaluated — skip"); continue
+            print(f"PR #{num} @ {oid}: already evaluated — skip eval"); continue
         print(f"PR #{num} @ {oid}: evaluating '{branch}' ...")
         r = subprocess.run([sys.executable, os.path.join(HERE, "vast_eval.py"),
                             "--reuse", str(args.instance), "--ref", branch,
