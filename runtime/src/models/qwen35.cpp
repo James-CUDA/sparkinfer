@@ -82,6 +82,19 @@ Qwen35Model::Qwen35Model(const Qwen35Config& cfg, KVCacheManager* kv, moe::MoEEn
     int zero=0; float one=1.f;
     cu(cudaMemcpy(p_->d_shared_ids,&zero,sizeof(int),cudaMemcpyHostToDevice),"shared ids");
     cu(cudaMemcpy(p_->d_shared_w,&one,sizeof(float),cudaMemcpyHostToDevice),"shared w");
+    // Fused-expert + flash-decoding decode scratch (batch 1). Allocated here so
+    // EVERY load path (set_weights / load_weights / load_gguf) has it — not just
+    // GGUF. (fa_* NULL here is what crashed flash_decode_split on the non-GGUF path.)
+    p_->mf_logits  = p_->alloc<float>(cfg.n_experts);
+    p_->mf_ids     = p_->alloc<int>(cfg.top_k);
+    p_->mf_weights = p_->alloc<float>(cfg.top_k);
+    p_->mf_counts  = p_->alloc<int>(cfg.n_experts);
+    p_->mf_h       = p_->alloc<float>((size_t)cfg.top_k * cfg.moe_ffn);
+    p_->mf_out     = p_->alloc<float>(cfg.hidden);
+    const size_t fa_n = (size_t)cfg.n_q_heads * p_->n_splits;
+    p_->fa_m   = p_->alloc<float>(fa_n);
+    p_->fa_l   = p_->alloc<float>(fa_n);
+    p_->fa_acc = p_->alloc<float>(fa_n * cfg.head_dim);
 }
 
 Qwen35Model::~Qwen35Model() {
@@ -342,19 +355,8 @@ bool Qwen35Model::load_gguf(const std::string& path) {
         if (!w.wq || !w.router_w || !w.gate_q || !w.up_q || !w.down_q) return false;
         if (i == 0 || i == c.n_layers - 1) fprintf(stderr, "[gguf] layer %d loaded\n", i);
     }
-    // fused-expert decode scratch (batch 1)
-    cudaMalloc((void**)&s.mf_logits,  (size_t)c.n_experts * sizeof(float));
-    cudaMalloc((void**)&s.mf_ids,     (size_t)c.top_k * sizeof(int));
-    cudaMalloc((void**)&s.mf_weights, (size_t)c.top_k * sizeof(float));
-    cudaMalloc((void**)&s.mf_counts,  (size_t)c.n_experts * sizeof(int));
-    cudaMalloc((void**)&s.mf_h,       (size_t)c.top_k * c.moe_ffn * sizeof(float));
-    cudaMalloc((void**)&s.mf_out,     (size_t)c.hidden * sizeof(float));
-    // flash-decoding attention partials (num_seqs=1)
-    const size_t fa_n = (size_t)c.n_q_heads * s.n_splits;
-    cudaMalloc((void**)&s.fa_m,   fa_n * sizeof(float));
-    cudaMalloc((void**)&s.fa_l,   fa_n * sizeof(float));
-    cudaMalloc((void**)&s.fa_acc, fa_n * c.head_dim * sizeof(float));
-    return s.mf_out != nullptr && s.fa_acc != nullptr;
+    // decode scratch (mf_* / fa_*) is allocated in the constructor for all paths.
+    return true;
 }
 
 } // namespace sparkinfer
