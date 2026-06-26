@@ -4,7 +4,7 @@ window.SPARKINFER = {
   "status": {
     "gpu": "RTX 5090 · sm_120 · CUDA 13",
     "model": "Qwen3-30B-A3B · Q4_K_M",
-    "frontier_tps": 307.03,
+    "frontier_tps": 291.58,
     "ref_name": "llama.cpp",
     "ref_tps": 365.73,
     "vram_gb": 21.4,
@@ -505,18 +505,6 @@ window.SPARKINFER = {
       "name": "int8 dp4a MMVQ for the Q6_K ",
       "tps": 291.58,
       "pr": 65,
-      "date": "2026-06-26"
-    },
-    {
-      "name": "mmvq down split-K occupancy ",
-      "tps": 303.24,
-      "pr": 67,
-      "date": "2026-06-26"
-    },
-    {
-      "name": "int8 mmvq for the last fp32-",
-      "tps": 307.03,
-      "pr": 70,
       "date": "2026-06-26"
     }
   ]
