@@ -55,4 +55,21 @@ void launch_gemv_q(const void* x, const void* W, int wtype, void* y, int N, int 
 void launch_gemv_q_f32(const void* x, const void* W, int wtype, float* y, int N, int K,
                        cudaStream_t stream = nullptr);
 
+// Pre-quantized Q8_1 activation path: quantize x[K] ONCE (q8 int8 [K], ad/as [K/32]),
+// then run Q4_K dp4a GEMVs that read it — kills the per-block re-quantization that the
+// in-kernel dp4a path repeats N/8 times (and per GEMV). Output is bit-exact vs that path.
+void launch_quantize_q8_1(const void* x, void* q8, float* ad, float* as, int K,
+                          cudaStream_t stream = nullptr);
+void launch_gemv_q_dp4a_pq(const void* q8, const float* ad, const float* as, const void* W,
+                           void* y, int N, int K, cudaStream_t stream = nullptr);
+void launch_gemv_q_dp4a_pq_f32(const void* q8, const float* ad, const float* as, const void* W,
+                               float* y, int N, int K, cudaStream_t stream = nullptr);
+
+// Faithful llama.cpp Q4_K mul_mat_vec_q: activation in block_q8_1 (llama_q8_1_bytes(K) bytes),
+// nwarps=4 cooperate per row. A/B test vs our split-K dp4a (SPARKINFER_LLAMA=1).
+size_t llama_q8_1_bytes(int K);
+void launch_quantize_q8_1_blocks(const void* x, void* y, int K, cudaStream_t stream = nullptr);
+void launch_mmvq_q4k(const void* q81, const void* W, void* y, int N, int K, cudaStream_t stream = nullptr);
+void launch_mmvq_q4k_f32(const void* q81, const void* W, float* y, int N, int K, cudaStream_t stream = nullptr);
+
 }} // namespace sparkinfer::kernels
