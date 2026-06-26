@@ -60,7 +60,8 @@ microbenchmark). Then the bot greenlights it (**`test-on-5090`**) and evaluates 
 - Box ticked but the decode table empty / placeholder / no gain → **`needs-benchmark`**, not evaluated
   (fill in real numbers and it greenlights automatically).
 - Box not ticked → **`not-tested`**, not evaluated.
-- A maintainer can add **`force-eval`** to evaluate regardless of the table.
+There is **no override** — every PR is evaluated on a real RTX 5090 only after it legitimately
+passes the gate (box ticked + real before<after decode numbers).
 
 > ⚠️ Tick that box **only if you actually ran it on an RTX 5090** and pasted the benchmark log.
 > Checking it without testing is false attestation — it is treated as gaming and the account will

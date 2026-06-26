@@ -35,11 +35,11 @@ AREAS = {"kernels", "runtime", "moe", "bench"}
 # clear improvement (after > before) — checking the box alone is not enough (it wasted GPU on PRs
 # whose decode table was still the placeholder). States: greenlit -> test-on-5090 (eval); box
 # ticked but no valid before<after -> needs-benchmark (skip + ask for numbers); box unticked ->
-# not-tested (skip). FORCE_LABEL is a maintainer override that bypasses the benchmark check.
+# not-tested (skip). There is NO manual override — every eval must pass the gate on real RTX 5090
+# before/after numbers; nothing bypasses the benchmark check.
 EVAL_GATE_LABEL  = "test-on-5090"     # bot-set marker: greenlit, will be evaluated
 NOT_TESTED_LABEL = "not-tested"       # box not ticked
 NEEDS_BENCH_LABEL = "needs-benchmark" # box ticked but decode before/after missing/invalid/no-gain
-FORCE_LABEL      = "force-eval"       # maintainer override — eval regardless of the benchmark table
 
 def gh(args):
     return subprocess.run(["gh"] + args, capture_output=True, text=True)
@@ -191,12 +191,10 @@ def _decode_val(body, key):
 
 def greenlight_status(repo, num, pr_labels):
     """Decide whether a PR may be evaluated. Returns (status, reason):
-      'ok'        — greenlit (force-eval label, or box ticked + real before<after decode numbers)
+      'ok'        — greenlit: box ticked + real before<after decode numbers (no override exists)
       'no-bench'  — box ticked but the decode before/after table is missing/placeholder/no-gain
       'unchecked' — the 'Tested on RTX 5090' box is not ticked
     Checking the box is necessary but NOT sufficient — a clear decode improvement must be claimed."""
-    if FORCE_LABEL in pr_labels:
-        return "ok", "maintainer force-eval"
     body = (json.loads(gh(["pr", "view", str(num), "-R", repo, "--json", "body"]).stdout or "{}")
             .get("body") or "")
     if not any(re.search(r"\[\s*[xX]\s*\]", ln) and "5090" in ln for ln in body.splitlines()):
@@ -215,7 +213,7 @@ def post_needs_bench_comment(repo, num):
             "improvement.\n\nFill it from the **end-to-end** decode bench (not an isolated-kernel "
             "microbench):\n```bash\nbench/scripts/bench.sh --download            # baseline (before)\n"
             "bench/scripts/bench.sh --download            # your branch (after)\n```\n"
-            "Then the bot greenlights it on the next poll. (A maintainer can add `force-eval` to override.)")
+            "Then the bot greenlights it on the next poll and evaluates it on an RTX 5090.")
     gh(["pr", "comment", str(num), "-R", repo, "--body", body])
 
 def _owner_repo(repo):
@@ -417,7 +415,7 @@ def main():
         # PENALTY_DAYS (from the first strike). During the window the bot does NOT greenlight any of
         # their PRs — it applies `penalty` and skips, instead of `test-on-5090`.
         pen_until = author_penalty_until(pr_author.get(num, "?"))
-        if pen_until and FORCE_LABEL not in {l["name"] for l in pr.get("labels", [])}:
+        if pen_until:
             print(f"PR #{num}: author {pr_author.get(num,'?')} under copycat penalty until {pen_until} "
                   f"— {PENALTY_LABEL}, skip eval")
             if not args.dry_run:
@@ -427,7 +425,7 @@ def main():
                     if L in cur: remove_label(args.repo, num, L)
             continue
         # Gate 3 — greenlight (proof-gated): evaluate only if the PR ticks the RTX-5090 box AND
-        # fills the decode before/after table with a real improvement (or a maintainer set force-eval).
+        # fills the decode before/after table with a real improvement. No override exists.
         # Reconcile labels each poll so a stale test-on-5090 can't keep a no-benchmark PR in the queue.
         pr_labels = {l["name"] for l in pr.get("labels", [])}
         def _reconcile(keep, drop):
