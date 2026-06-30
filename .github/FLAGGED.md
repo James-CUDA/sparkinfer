@@ -61,3 +61,7 @@ supersedes the auto-block records above.
 ## 2026-06-29 — `ai-engram` (auto-blocked)
 
 Auto-blocked: copycat of #83 (fansilas) re-submitted as PR #88. Zero-tolerance copycat policy.
+
+## 2026-06-30 — `carlh7777` (auto-blocked)
+
+Flagged for eval-gaming / coordinated farming. PR #112 (`fuse down-projection Q8_1 quantize into gate/up`, self-reported -4.7%) duplicates the approach of #105 by a DIFFERENT account (andriypolanski, `emit Q8_1 from gate/up ... drop the MoE-down quantize node`) with an identical -4.7% measured result — a copycat / sybil-coordination signal. History: 3 PRs, none merged (#49 + #99 closed not-tested; #112 a known regression submitted as a perf PR). Blocked per the no-gaming policy; future PRs auto-close.
