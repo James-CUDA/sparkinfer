@@ -51,7 +51,7 @@ REPORT_CTX="${SPARKINFER_REPORT_CTX:-32768}"
 DECODE_TOKENS="${SPARKINFER_DECODE_TOKENS:-128}"
 SCORE_REPS="${SPARKINFER_SCORE_REPS:-3}"
 GUARD_REPS="${SPARKINFER_GUARD_REPS:-1}"
-REPORT_REPS="${SPARKINFER_REPORT_REPS:-1}"
+REPORT_REPS="${SPARKINFER_REPORT_REPS:-0}"
 GUARD_BASELINE="${SPARKINFER_GUARD_2K_BASELINE:-0}"
 GUARD_TOL="${SPARKINFER_GUARD_2K_TOL:-0.98}"
 
@@ -80,11 +80,19 @@ if [ "$EVAL_MODE" = "short" ]; then
   TPS="$(median_ctx 0 3)"
   GUARD_TPS=0; REPORT_TPS=0; GUARD_PASS=true; GUARD_RATIO=0
 else
-  echo ">> long-context policy: ${GUARD_CTX} ctx no-regression gate; ${SCORE_CTX} ctx scored; ${REPORT_CTX} ctx telemetry" >&2
+  if [ "$REPORT_REPS" -gt 0 ]; then
+    echo ">> long-context policy: ${GUARD_CTX} ctx no-regression gate; ${SCORE_CTX} ctx scored; ${REPORT_CTX} ctx telemetry" >&2
+  else
+    echo ">> long-context policy: ${GUARD_CTX} ctx no-regression gate; ${SCORE_CTX} ctx scored; telemetry disabled" >&2
+  fi
   si_run qwen3_gguf_bench "$GGUF" 64 "$GUARD_CTX" >/dev/null 2>&1 || true
   GUARD_TPS="$(median_ctx "$GUARD_CTX" "$GUARD_REPS")"
   TPS="$(median_ctx "$SCORE_CTX" "$SCORE_REPS")"
-  REPORT_TPS="$(median_ctx "$REPORT_CTX" "$REPORT_REPS")"
+  if [ "$REPORT_REPS" -gt 0 ]; then
+    REPORT_TPS="$(median_ctx "$REPORT_CTX" "$REPORT_REPS")"
+  else
+    REPORT_TPS=0
+  fi
   GUARD_RATIO="$(python3 - <<PY
 base=float("$GUARD_BASELINE")
 cur=float("$GUARD_TPS")
@@ -124,7 +132,8 @@ PROV="$(python3 - <<PY
 import json
 score_ctx = 128 if "$EVAL_MODE" == "short" else int("$SCORE_CTX")
 guard_ctx = 0 if "$EVAL_MODE" == "short" else int("$GUARD_CTX")
-report_ctx = 0 if "$EVAL_MODE" == "short" else int("$REPORT_CTX")
+report_reps = int("$REPORT_REPS")
+report_ctx = 0 if "$EVAL_MODE" == "short" or report_reps <= 0 else int("$REPORT_CTX")
 data = {
   "clocks_pinned": "$CP" == "true",
   "clock_mhz": "$GCLK",
@@ -140,15 +149,16 @@ data = {
 if "$EVAL_MODE" != "short":
   data.update({
     "guard_context": guard_ctx,
-    "report_context": report_ctx,
     "ctx_2048_tps": round(float("$GUARD_TPS"), 2),
     "ctx_16384_tps": round(float("$TPS"), 2),
-    "ctx_32768_tps": round(float("$REPORT_TPS"), 2),
     "guard_2k_baseline": round(float("$GUARD_BASELINE"), 2),
     "guard_2k_ratio": round(float("$GUARD_RATIO"), 4),
     "guard_2k_tol": float("$GUARD_TOL"),
     "guard_2k_pass": "$GUARD_PASS" == "true",
   })
+  if report_reps > 0:
+    data["report_context"] = report_ctx
+    data["ctx_32768_tps"] = round(float("$REPORT_TPS"), 2)
 print(json.dumps(data, separators=(",", ":")))
 PY
 )"

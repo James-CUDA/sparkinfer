@@ -39,7 +39,8 @@ value. Reuse mode assumes the weights are cached at `/workspace/models`.
 The default eval target is now long-context decode:
 - **2k context**: no-regression guard. A PR must keep at least 98% of same-box `origin/main` 2k speed.
 - **16k context**: scored frontier. Labels are based on verified 16k speedup over same-box `origin/main`.
-- **32k context**: telemetry only for now. It is published in the verdict/log but does not score yet.
+
+32k telemetry is disabled by default; set `SPARKINFER_REPORT_REPS=1` only for explicit manual probes.
 
 Set `SPARKINFER_EVAL_MODE=short` or pass `--eval-mode short` to keep the legacy 128-token scoring path.
 

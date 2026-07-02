@@ -313,7 +313,7 @@ def render(res, oid):
             "BASELINE": "No frontier was set; this run establishes it."
             }.get(label, f"Verified speedup — **sets the new frontier to {res.get('tps')} tok/s** "
                          f"(was {res.get('frontier_tps','?')}).")
-    target_note = ("2k no-regression gate · 16k scored frontier · 32k telemetry"
+    target_note = ("2k no-regression gate · 16k scored frontier"
                    if res.get("eval_mode") == "longctx" else "128-token decode frontier")
     return (f"<!-- sparkinfer-eval:{oid} -->\n"
             f"## {icon} sparkinfer auto-eval — `{oid}`\n\n"
