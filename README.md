@@ -19,6 +19,16 @@ _It is designed for the next generation of personal agents like **Openclaw**, lo
 | 4k | **392.65 tok/s** | 292.99 tok/s | 202.65 tok/s | 234.67 tok/s | failed |
 | 16k | **266.14 tok/s** | 245.53 tok/s | 81.89 tok/s | 226.12 tok/s | not run |
 
+Runtime footprint, excluding model weights and Python launcher scripts:
+
+| runtime | measured artifact | size | sparkinfer is |
+|---|---|---:|---:|
+| sparkinfer | native runtime binary | **2.5 MB** | baseline |
+| llama.cpp | CUDA runtime executable + shared libs | 80 MB | 33x smaller |
+| vLLM | runtime package | 605 MB | 243x smaller |
+| SGLang | runtime + native kernel packages | 1.9 GB | 743x smaller |
+| TensorRT-LLM | runtime package | 3.6 GB | 1,430x smaller |
+
 sparkinfer and llama.cpp use the same GGUF on the same RTX 5090. Other runtimes cannot load
 GGUF, so the table uses their fastest successful HF quantized path: vLLM/SGLang GPTQ Int4,
 TensorRT-LLM NVFP4. Details: [`bench/competitors/latest-results.md`](bench/competitors/latest-results.md).
