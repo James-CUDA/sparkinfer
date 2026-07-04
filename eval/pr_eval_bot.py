@@ -776,7 +776,13 @@ def main():
         me = pr_author.get(num, "?")
         for earlier in all_nums:
             if earlier >= num: break
-            if pr_author.get(earlier, "?") == me: continue   # ignore one's own earlier PRs
+            ea_login = pr_author.get(earlier, "?")
+            if ea_login == me: continue                      # ignore one's own earlier PRs
+            # A blocked copier's PR (or one already adjudicated as a copy) must NOT be usable as the
+            # "original": otherwise a copier can front-run the real author by opening an earlier-numbered
+            # PR (even an empty placeholder later force-pushed), get flagged, yet still frame the author.
+            if ea_login.lower() in denylist: continue
+            if earlier in logged_copycats: continue
             ef, ea = fps.get(earlier, (set(), set()))
             if (files & ef) and containment(added, ea) >= COPYCAT_CONTAINMENT:
                 return earlier
