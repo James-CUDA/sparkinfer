@@ -40,9 +40,10 @@
     "date": "2026-07-03"
   },
   {
-    "pr": 221,
-    "author": "fansilas",
-    "original": 209,
-    "date": "2026-07-04"
+    "pr": 209,
+    "author": "jony376",
+    "original": 221,
+    "date": "2026-07-04",
+    "note": "reattributed: #209 is a verbatim copy of fansilas's #221 (fansilas authored the #195 kernel; jony376 commit 11:18 > fansilas 05:23)"
   }
 ]

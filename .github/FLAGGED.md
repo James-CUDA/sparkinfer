@@ -105,6 +105,16 @@ Auto-blocked after 1 copycat PRs (#132).
 
 Auto-blocked after 1 copycat PRs (#191).
 
-## 2026-07-04 — `fansilas` (auto-blocked)
+## 2026-07-04 — `jony376` (copycat) · `fansilas` UN-blocked (false attribution — reversed)
 
-Auto-blocked after 1 copycat PRs (#221).
+The auto-block of **`fansilas`** over #221 was a **misattribution and has been reversed.**
+`fa_split_gqa_mma_i8_kernel` is fansilas's own kernel (#195, `eval:XL`, merged 03:47); #221 (fansilas,
+commit **05:23**) is their legitimate follow-up trimming its shared int32→float round-trip. #209
+(`jony376`) is a **verbatim-identical** copy of that change — same code *and* the same multi-line
+comments — but its commit is dated **11:18, ~6h after** fansilas's 05:23 (#209 was *opened* at 02:47 as an
+empty placeholder, then the copied code was force-pushed in at 11:18). The detector attributed "original"
+by earliest PR-*open* time, which inverted the real authorship.
+
+**Action:** `fansilas` removed from `blocked-contributors.txt`; #221 reopened + un-flagged. Strike
+reassigned to **`jony376`** — #209 labeled `flagged:gaming`/`copycat` + closed, `jony376` added to
+`blocked-contributors.txt`. fansilas's merged record (#195/#122/#86/#83) stands.
