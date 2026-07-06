@@ -1,23 +1,26 @@
 name: copycat-guard
 # Real-time copycat detection — fires the instant a PR is opened (pull_request_target
 # runs from the BASE branch context, so it has full repo access to read all PRs, label,
-# comment, and close). No GPU, no eval — just fingerprint comparison against all earlier
-# open PRs. If >=80% containment in a different author's earlier PR, the new PR is
-# flagged, the account blocked, and the PR closed within seconds of creation.
+# comment, and close). Four-layer detection:
+#   L1: containment >=80% -> block+close (zero tolerance)
+#   L2: containment 70-79% -> copycat-warn + comment
+#   L3: containment 40-69% + Levenshtein>=0.70 + bigram_cosine>=0.60 -> bump to WARN
+#   L4: per-function containment 30-79% + DeepSeek LLM judge -> bump to WARN
+#   2nd warning strike (any layer) -> block+close
 
 on:
   pull_request_target:
     types: [opened]
 
 permissions:
-  contents: write          # push policy files (copycats.json, blocked-contributors.txt)
+  contents: write          # push policy files
   pull-requests: write     # label + comment + close
-  issues: write            # PR comment (shares the Issues permission)
+  issues: write            # PR comment
 
 jobs:
   guard:
     runs-on: ubuntu-latest
-    # Don't block maintainer PRs — only guard external contributions
+    # Skip maintainer PRs
     if: github.event.pull_request.author_association != 'OWNER' && github.event.pull_request.author_association != 'MEMBER' && github.event.pull_request.author_association != 'COLLABORATOR'
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +31,7 @@ jobs:
       - name: Run copycat guard
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           PR_NUM: ${{ github.event.pull_request.number }}
         run: |
           PR_NUM="$PR_NUM" python3 eval/copycat_guard.py
