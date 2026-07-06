@@ -144,13 +144,17 @@ window.SPARKINFER = {
         "kernels",
         "runtime"
       ],
-      "label": "REJECT",
-      "tps": 0,
-      "delta_pct": 0,
+      "label": "S",
+      "tps": 241.75,
+      "delta_pct": 7.3,
       "top1": 0.97,
       "kl": 0.02,
       "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/243",
-      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0243-79058f2"
+      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0243-79058f2",
+      "guard_128_baseline": 225.24,
+      "ctx_128_tps": 241.75,
+      "ctx_512_tps": 239.12,
+      "ctx_4096_tps": 227.19
     },
     {
       "num": 241,
@@ -159,7 +163,7 @@ window.SPARKINFER = {
         "kernels",
         "runtime"
       ],
-      "label": "REJECT",
+      "label": "L",
       "tps": 254.72,
       "delta_pct": 13.1,
       "top1": 0.97,
@@ -179,9 +183,9 @@ window.SPARKINFER = {
         "kernels",
         "runtime"
       ],
-      "label": "REJECT",
-      "tps": 0,
-      "delta_pct": 0,
+      "label": "XS",
+      "tps": 233.5,
+      "delta_pct": 3.8,
       "top1": 0.97,
       "kl": 0.02,
       "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/239",
