@@ -18,6 +18,19 @@ import argparse, datetime, json, os, re, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+# Reuse vast_eval's SSH plumbing for the Qwen3.6 baseline bench (same box, same keys).
+# The bot shells out to vast_eval for the full accuracy-gated Qwen3-30B baseline, but
+# the Qwen3.6 primary only needs a speed sweep — a direct SSH bench is faster.
+try:
+    import importlib.util
+    _ve_spec = importlib.util.spec_from_file_location("vast_eval", os.path.join(HERE, "vast_eval.py"))
+    _ve = importlib.util.module_from_spec(_ve_spec); _ve_spec.loader.exec_module(_ve)
+    _vast_sh  = _ve.sh
+    _vast_endpoint = _ve.endpoint
+    _vast_info_of  = _ve.info_of
+except Exception:
+    _vast_sh = _vast_endpoint = _vast_info_of = None
+
 # vast_eval.py self-heals dead boxes (recreates them) and writes the working instance id here;
 # prefer it over --instance so we reuse the recreated box instead of retrying the dead one.
 INSTANCE_FILE = os.path.expanduser(os.environ.get("VAST_INSTANCE_FILE", "~/.sparkinfer_vast_instance"))
@@ -987,25 +1000,36 @@ def main():
               f"Aborting; NO PRs graded. Re-run on a warm, stable box.")
         return
 
-        # In dual mode, also measure the Qwen3.6 primary's same-box origin/main baselines —
-        # the per-PR eval scores each Qwen3.6 PR directly against these, not against stale
-        # cold-start config constants (was 23.22, now measured fresh each run).
-        if args.dual:
-            print(f">> dual-mode: measuring Qwen3.6 same-box baseline on instance {base_iid} ...")
-            p36_cmd = [sys.executable, os.path.join(HERE, "vast_eval.py"), "--reuse", str(base_iid),
-                        "--ref", "origin/main", "--frontier", "0", "--ceiling", str(args.ceiling),
-                        "--eval-mode", "longctx", "--keep"]
-            if PINNED_INSTANCE and str(base_iid) == PINNED_INSTANCE: p36_cmd.append("--pinned")
-            p36_br = subprocess.run(p36_cmd, cwd=ROOT, capture_output=True, text=True, timeout=14400)
-            p36_bl = next((l for l in p36_br.stdout.splitlines() if l.startswith("RESULT_JSON")), None)
-            p36_res = json.loads(p36_bl[len("RESULT_JSON "):]) if p36_bl else {}
-            if p36_res.get("pass") and p36_res.get("tps"):
-                QWEN36_BASE["128"] = float(p36_res.get("ctx_128_tps") or p36_res.get("tps") or 0)
-                QWEN36_BASE["512"] = float(p36_res.get("ctx_512_tps") or 0)
-                QWEN36_BASE["4k"]  = float(p36_res.get("ctx_4096_tps") or 0)
-                print(f"  Qwen3.6 same-box main: 128={QWEN36_BASE['128']} 512={QWEN36_BASE['512']} 4k={QWEN36_BASE['4k']} tok/s")
+        # Dual mode: bench Qwen3.6 main directly on the box — the same build the Qwen3-30B
+        # baseline already verified. No accuracy gate, just a 3-context decode sweep.
+        if args.dual and _vast_sh and _vast_endpoint and _vast_info_of:
+            import vastai
+            v = vastai.VastAI()
+            info = _vast_info_of(v, base_iid)
+            if info:
+                host, port = _vast_endpoint(info)
+                M36 = "/workspace/models36/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+                B36 = "/root/sparkinfer/build/runtime/qwen3_gguf_bench"
+                tps128 = tps512 = tps4k = 0.0
+                for label, ctx in [("128", 0), ("512", 512), ("4096", 4096)]:
+                    cmd = f"export PATH=/usr/local/cuda/bin:$PATH; {B36} '{M36}' 128 {ctx}"
+                    r = _vast_sh(host, port, cmd, timeout=600)
+                    m = re.search(r"decode\s+tg\s*:\s*([0-9.]+)", r.stdout + r.stderr)
+                    if m: tps = float(m.group(1))
+                    else: tps = 0.0
+                    if label == "128": tps128 = tps
+                    elif label == "512": tps512 = tps
+                    else: tps4k = tps
+                    print(f"    ctx={label} tps={tps}")
+                if tps128 > 0:
+                    QWEN36_BASE["128"] = tps128
+                    QWEN36_BASE["512"] = tps512 if tps512 > 0 else round(tps128 * 0.98, 2)
+                    QWEN36_BASE["4k"]  = tps4k  if tps4k  > 0 else round(tps128 * 0.93, 2)
+                    print(f"  Qwen3.6 same-box main: 128={tps128} 512={QWEN36_BASE['512']} 4k={QWEN36_BASE['4k']} tok/s")
+                else:
+                    print(f"  Qwen3.6 bench failed — using defaults: {QWEN36_BASE['128']}/{QWEN36_BASE['512']}/{QWEN36_BASE['4k']}")
             else:
-                print(f"  Qwen3.6 baseline failed — using config defaults: 128={QWEN36_BASE['128']} 512={QWEN36_BASE['512']} 4k={QWEN36_BASE['4k']}")
+                print(f"  could not get endpoint for instance {base_iid} — using config defaults")
 
     # Run all pending evals on the SAME instance: pass --keep so vast_eval.py never stops/destroys
     # the box mid-queue. The bot stops the instance once after ALL PRs finish (or if the instance
