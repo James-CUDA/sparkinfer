@@ -147,6 +147,7 @@ struct Qwen35Model::Impl {
     bool use_qkfuse = true;// default ON: fused per-head Q-norm + K-norm (1 kernel). =0 disables
     bool use_ropekv = true;// default ON: fused RoPE + KV-append (1 kernel vs 2). =0 disables
     bool use_attnin = true;// default ON: single fused QK-norm+RoPE+KV-append (1 kernel vs qkfuse+ropekv=2). =0 disables
+    bool use_attngq8 = true;// default ON: fused mul_sigmoid+Q8_1 on gated full-attn O-proj (1 kernel vs 2). =0 disables
     bool use_fnq = true;   // default ON: post-MoE add_rmsnorm2 also emits Q8_1(xn), deleting the
                            // next layer's standalone QKV-input quantize node. =0 disables
     bool use_gdn_pipe = true;   // default ON: overlap GDN gate/scalar projections on side streams. =0 disables
@@ -256,6 +257,7 @@ Qwen35Model::Qwen35Model(const Qwen35Config& cfg, KVCacheManager* kv, moe::MoEEn
     if (const char* e = getenv("SPARKINFER_FNQ"))    p_->use_fnq   = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_QKVSTREAM")) p_->use_qkvstream = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_ATTNIN")) p_->use_attnin = !(e[0] == '0');
+    if (const char* e = getenv("SPARKINFER_ATTNGQ8")) p_->use_attngq8 = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_GDN_PIPE")) p_->use_gdn_pipe = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_SHEXP_PIPE")) p_->use_shexp_pipe = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_ADDNORM3")) p_->use_addnorm3 = !(e[0] == '0');
@@ -583,13 +585,22 @@ int Qwen35Model::forward_token(int token_id, int position) {
                                                s.kv->block_size(), s.kv->max_blocks_per_seq(), s.n_splits,
                                                1.f / sqrtf((float)c.head_dim), st,
                                                emit_attn_q8 ? s.aq81 : nullptr, seqlen, kscale, vscale, kv8 ? 1 : 0);
-            if (w.q_has_gate)
-                kernels::launch_qwen36_mul_sigmoid(s.attn, s.qgate, s.qdim, st);
+            if (w.q_has_gate) {
+                const bool attngq8 = s.use_attngq8 && s.gguf && s.use_pq && s.use_llama &&
+                                     w.wo_type == 12 && c.head_dim == 256;
+                if (attngq8)
+                    kernels::launch_qwen36_mul_sigmoid_q8(s.attn, s.qgate, s.aq81,
+                                                          c.n_q_heads, c.head_dim, st);
+                else
+                    kernels::launch_qwen36_mul_sigmoid(s.attn, s.qgate, s.qdim, st);
+            }
 
             // ---- O projection (main's int8 mmvq path) ----
             if (s.gguf && s.use_pq && w.wo_type == 12) {
                 if (s.use_llama) {
-                    if (!emit_attn_q8) kernels::launch_quantize_q8_1_blocks(s.attn, s.aq81, s.qdim, st);
+                    const bool attngq8 = w.q_has_gate && s.use_attngq8 && c.head_dim == 256;
+                    if (!emit_attn_q8 && !attngq8)
+                        kernels::launch_quantize_q8_1_blocks(s.attn, s.aq81, s.qdim, st);
                     kernels::launch_mmvq_q4k(s.aq81, w.wo, s.ao, H, s.qdim, st);
                 } else {
                     kernels::launch_quantize_q8_1(s.attn, s.aq8, s.aq8_d, s.aq8_s, s.qdim, st);

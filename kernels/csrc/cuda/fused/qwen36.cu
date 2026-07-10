@@ -444,6 +444,39 @@ __global__ void gated_norm_q8_warp_kernel(const __nv_bfloat16* __restrict__ x,
 template __global__ void gated_norm_q8_warp_kernel<128>(const __nv_bfloat16*, const __nv_bfloat16*,
     const __nv_bfloat16*, si_blk_q8_1*, int, float);
 
+// Post-attention gate (mul_sigmoid) then Q8_1 — bit-identical to mul_sigmoid + quantize_q8_1_blocks.
+// One warp per head; bf16-round before per-block quant matches the two-kernel path.
+template <int HEAD_DIM>
+__global__ void mul_sigmoid_q8_warp_kernel(const __nv_bfloat16* __restrict__ attn,
+                                           const __nv_bfloat16* __restrict__ gate,
+                                           si_blk_q8_1* __restrict__ out_q8,
+                                           int n_heads) {
+    constexpr int NROW = HEAD_DIM / 32;
+    const int h = blockIdx.x;
+    const int lane = threadIdx.x & 31;
+    if (h >= n_heads) return;
+    const size_t base = (size_t)h * HEAD_DIM;
+    const int qbase = h * NROW;
+    #pragma unroll
+    for (int r = 0; r < NROW; r++) {
+        const int t = lane + r * 32;
+        const float y = q36_to_f(attn[base + t]) * q36_sigmoid(q36_to_f(gate[base + t]));
+        const float bv = __bfloat162float(__float2bfloat16(y));
+        float amax = fabsf(bv);
+        #pragma unroll
+        for (int m = 16; m > 0; m >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, m));
+        const float d = amax / 127.0f;
+        const int qi = (amax == 0.0f) ? 0 : (int)roundf(bv / d);
+        out_q8[qbase + r].qs[lane] = (signed char)qi;
+        int s = qi;
+        #pragma unroll
+        for (int m = 16; m > 0; m >>= 1) s += __shfl_xor_sync(0xffffffffu, s, m);
+        if (lane == 0) out_q8[qbase + r].ds = __floats2half2_rn(d, d * (float)s);
+    }
+}
+template __global__ void mul_sigmoid_q8_warp_kernel<256>(const __nv_bfloat16*, const __nv_bfloat16*,
+    si_blk_q8_1*, int);
+
 #ifndef SPARKINFER_NVRTC_DEVICE_ONLY
 #include "sparkinfer/kernels/fused.h"
 
@@ -603,6 +636,16 @@ void launch_qwen36_gated_norm_q8(const void* x_bf16, const void* z_bf16,
         reinterpret_cast<const __nv_bfloat16*>(weight_bf16),
         reinterpret_cast<si_blk_q8_1*>(out_q8),
         v_heads, eps);
+}
+
+void launch_qwen36_mul_sigmoid_q8(const void* attn_bf16, const void* gate_bf16,
+                                  void* out_q8, int n_heads, int head_dim,
+                                  cudaStream_t stream) {
+    (void)head_dim;
+    mul_sigmoid_q8_warp_kernel<256><<<n_heads, 32, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(attn_bf16),
+        reinterpret_cast<const __nv_bfloat16*>(gate_bf16),
+        reinterpret_cast<si_blk_q8_1*>(out_q8), n_heads);
 }
 #endif
 

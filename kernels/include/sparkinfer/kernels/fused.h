@@ -87,4 +87,9 @@ void launch_qwen36_gated_norm_q8(const void* x_bf16, const void* z_bf16,
                                  int v_heads, int head_dim, float eps,
                                  cudaStream_t stream = nullptr);
 
+// Post-attention gate (mul_sigmoid) + Q8_1 emit for O-proj MMVQ on gated full-attn layers.
+void launch_qwen36_mul_sigmoid_q8(const void* attn_bf16, const void* gate_bf16,
+                                  void* out_q8, int n_heads, int head_dim,
+                                  cudaStream_t stream = nullptr);
+
 }} // namespace sparkinfer::kernels
