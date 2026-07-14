@@ -60,6 +60,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
     if (TILE <= 1) { pf_fail("tile_rows"); return false; }
 
     cudaStream_t st = s.stream;
+    cu(cudaStreamSynchronize(st), "batched prefill stream drain");
 
     auto ensure_bufs = [&](int M) {
         if (M <= s.pf_tile_cap) return;

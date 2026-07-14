@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
         (void)ref.forward_token(prompt[(size_t)i], i);
     const int dec_ref = ref.forward_token(decode_probe, n_tokens);
     ref.copy_logits(logits_ref.data());
+    cudaDeviceSynchronize();
 
     if (!getenv("SPARKINFER_PREFILL_BATCHED") || getenv("SPARKINFER_PREFILL_BATCHED")[0] != '1') {
         printf("SKIP batched path (set SPARKINFER_PREFILL_BATCHED=1)\n");
