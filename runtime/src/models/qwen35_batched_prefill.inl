@@ -1,5 +1,7 @@
 // Chunked batched-prefill orchestration (included from qwen35.cpp).
 
+#include <algorithm>
+
 namespace {
 
 static int prefill_tile_rows() {
@@ -39,7 +41,11 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         pf_fail("guards"); return false;
     }
     if (H != 2048 && H != 4096) { pf_fail("hidden"); return false; }
-    if (!s.kv->allocate(s.seq_id, c.max_seq)) { pf_fail("kv"); return false; }
+    if (!s.kv->block_table(s.seq_id)) {
+        if (!s.kv->allocate(s.seq_id, std::max(c.max_seq, (int)tokens.size()))) {
+            pf_fail("kv"); return false;
+        }
+    }
     if (c.n_shared > 0) { pf_fail("shared"); return false; }
 
     const int TILE = prefill_tile_rows();
