@@ -60,7 +60,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
     if (TILE <= 1) { pf_fail("tile_rows"); return false; }
 
     cudaStream_t st = s.stream;
-    cu(cudaStreamSynchronize(st), "batched prefill stream drain");
+    cu(cudaDeviceSynchronize(), "batched prefill device drain");
 
     auto ensure_bufs = [&](int M) {
         if (M <= s.pf_tile_cap) return;
@@ -338,6 +338,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
             const void* nextnorm = (L + 1 < c.n_layers) ? s.w.layers[L + 1].input_norm : s.w.final_norm;
             kernels::launch_add_rmsnorm2(s.pf_h, s.pf_routed, nextnorm, s.pf_x, s.pf_xn, M, H, c.rms_eps, st);
         }
+        cu(cudaStreamSynchronize(st), "batched chunk sync");
     }
 
     cu(cudaStreamSynchronize(st), "batched prefill sync");
