@@ -26,12 +26,23 @@ static int argmax(const float* logits, int vocab) {
     return best;
 }
 
-static float kl_div(const float* p, const float* q, int n) {
+static float kl_div(const float* a, const float* b, int n) {
+    // KL on softmax(logits); raw-logit exp() overflows and is not meaningful.
+    double max_a = a[0], max_b = b[0];
+    for (int i = 1; i < n; i++) {
+        if (a[i] > max_a) max_a = a[i];
+        if (b[i] > max_b) max_b = b[i];
+    }
+    double za = 0.0, zb = 0.0;
+    for (int i = 0; i < n; i++) {
+        za += std::exp((double)a[i] - max_a);
+        zb += std::exp((double)b[i] - max_b);
+    }
     double kl = 0.0;
     for (int i = 0; i < n; i++) {
-        const double pi = std::exp((double)p[i]);
-        const double qi = std::exp((double)q[i]);
-        if (pi > 1e-30) kl += pi * (std::log(pi) - std::log(std::max(qi, 1e-30)));
+        const double pa = std::exp((double)a[i] - max_a) / za;
+        const double pb = std::exp((double)b[i] - max_b) / zb;
+        if (pa > 1e-30) kl += pa * (std::log(pa) - std::log(std::max(pb, 1e-30)));
     }
     return (float)kl;
 }
@@ -93,6 +104,9 @@ int main(int argc, char** argv) {
 
     const int decode_probe = 100;
     std::vector<float> logits_ref((size_t)cfg.vocab), logits_bat((size_t)cfg.vocab);
+
+    // Eager decode for parity: CUDA-graph replay diverges at KV block boundaries (e.g. n=16).
+    setenv("SPARKINFER_DECODE_GRAPH", "0", 1);
 
     // Reference model: teacher-forced token loop (may capture decode graph).
     sparkinfer::KVCacheConfig kvc_ref{};

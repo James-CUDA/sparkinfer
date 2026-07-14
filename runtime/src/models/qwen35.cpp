@@ -470,13 +470,26 @@ int Qwen35Model::forward_token(int token_id, int position) {
     // Capture the decode compute into a CUDA graph on the first token at position 0,
     // then replay it every token. After batched prefill the first forward_token runs
     // at position>0 with KV already filled — skip capture there (eager decode).
-    if (s.graph_ready) {
+    // SPARKINFER_DECODE_GRAPH=0 disables capture (correctness harness / block-boundary debug).
+    static int decode_graph = -1;
+    if (decode_graph < 0) {
+        const char* e = getenv("SPARKINFER_DECODE_GRAPH");
+        decode_graph = (e && e[0] == '0') ? 0 : 1;
+    }
+    if (!decode_graph && s.graph_ready) {
+        cu(cudaGraphExecDestroy(s.cu_exec), "graph off destroy exec");
+        cu(cudaGraphDestroy(s.cu_graph), "graph off destroy graph");
+        s.cu_exec = nullptr;
+        s.cu_graph = nullptr;
+        s.graph_ready = false;
+    }
+    if (decode_graph && s.graph_ready) {
         cu(cudaGraphLaunch(s.cu_exec, st), "graph launch");
         cu(cudaMemcpyAsync(s.h_out_id, s.d_out_id, sizeof(int), cudaMemcpyDeviceToHost, st), "out_id");
         cu(cudaStreamSynchronize(st), "sync");
         return *s.h_out_id;
     }
-    const bool do_capture = (position == 0);
+    const bool do_capture = decode_graph && (position == 0);
     if (do_capture) cu(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "begin capture");
 
     kernels::launch_embedding(s.d_tok, s.w.embed_tokens, s.x, 1, H, st);
