@@ -138,11 +138,6 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         const char* e = getenv("SPARKINFER_ATTN_GQ8");
         attn_gq8_pf = (e && e[0] == '0') ? 0 : 1;
     }
-    static int gdn_gn_q8_pf = -1;
-    if (gdn_gn_q8_pf < 0) {
-        const char* e = getenv("SPARKINFER_GDN_GNORM_Q8");
-        gdn_gn_q8_pf = (e && e[0] == '0') ? 0 : 1;
-    }
     auto pf_update_splits = [&](int seqlen) {
         if (!s.adaptive_splits) return;
         int want = 32;
@@ -188,8 +183,6 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                     pf_fail("gdn qtypes"); return false;
                 }
 
-                const bool gdn_gn_q8 = s.gguf && s.use_pq && s.use_llama &&
-                    (w.ssm_out_type == 12 || w.ssm_out_type == 8) && c.linear_head_dim == 128;
                 for (int t = 0; t < M; ++t) {
                     const int pos = base + t;
                     const int seqlen = pos + 1;
@@ -220,21 +213,11 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                     kernels::launch_qwen36_gdn_ar(lin_q, lin_k, lin_v, lin_alpha, lin_beta,
                         w.ssm_dt, w.ssm_a, layer_state, lin_gdn,
                         c.linear_q_heads, c.linear_v_heads, c.linear_head_dim, st);
-                    if (gdn_gn_q8 && gdn_gn_q8_pf) {
-                        kernels::launch_qwen36_gated_norm_q8(lin_gdn, lin_z, w.ssm_norm, s.aq81,
-                            c.linear_v_heads, c.linear_head_dim, c.rms_eps, st);
-                        if (!pf_q4k_type(w.ssm_out_type)) return false;
-                        if (w.ssm_out_type == 12)
-                            kernels::launch_mmvq_q4k(s.aq81, w.ssm_out, ao, H, s.linear_vdim, st);
-                        else
-                            kernels::launch_mmvq_q80(s.aq81, w.ssm_out, ao, H, s.linear_vdim, st);
-                    } else {
-                        kernels::launch_qwen36_gated_norm(lin_gdn, lin_z, w.ssm_norm, lin_norm,
-                            c.linear_v_heads, c.linear_head_dim, c.rms_eps, st);
-                        if (!pf_q4k_type(w.ssm_out_type)) return false;
-                        kernels::launch_quantize_q8_1_blocks(lin_norm, s.aq81, s.linear_vdim, st);
-                        kernels::launch_mmvq_q4k(s.aq81, w.ssm_out, ao, H, s.linear_vdim, st);
-                    }
+                    kernels::launch_qwen36_gated_norm(lin_gdn, lin_z, w.ssm_norm, lin_norm,
+                        c.linear_v_heads, c.linear_head_dim, c.rms_eps, st);
+                    if (!pf_q4k_type(w.ssm_out_type)) return false;
+                    kernels::launch_quantize_q8_1_blocks(lin_norm, s.aq81, s.linear_vdim, st);
+                    kernels::launch_mmvq_q4k(s.aq81, w.ssm_out, ao, H, s.linear_vdim, st);
                 }
             } else {
                 if (!(pf_q4k_type(w.wq_type) && pf_q4k_type(w.wk_type) && pf_q4k_type(w.wv_type) &&
@@ -312,6 +295,13 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                     }
 
                     const bool sparse_on = sparse_avail && seqlen >= s.sparse_min_ctx;
+                    {
+                        const size_t fa_n = (size_t)c.n_q_heads * (size_t)s.n_splits;
+                        cu(cudaMemsetAsync(s.fa_m, 0, fa_n * sizeof(float), st), "pf fa_m zero");
+                        cu(cudaMemsetAsync(s.fa_l, 0, fa_n * sizeof(float), st), "pf fa_l zero");
+                        cu(cudaMemsetAsync(s.fa_acc, 0, fa_n * (size_t)c.head_dim * sizeof(float), st),
+                           "pf fa_acc zero");
+                    }
                     if (sparse_on && kv8) {
                         kernels::launch_fa_kv_window_select(s.d_seqlen, s.sparse_sel, c.n_kv_heads,
                             s.kv->block_size(), s.sparse_budget, s.sparse_window, st);
