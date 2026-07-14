@@ -35,9 +35,6 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
     if (H != 2048 && H != 4096) return false;
     if (!s.kv->allocate(s.seq_id, c.max_seq)) return false;
     if (c.n_shared > 0) return false;
-    for (const auto& w : s.w.layers) {
-        if (w.q_has_gate) return false;
-    }
 
     const int TILE = prefill_tile_rows();
     if (TILE <= 1) return false;
@@ -48,6 +45,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         freep(s.pf_toks); freep(s.pf_pos);
         freep(s.pf_x); freep(s.pf_xn); freep(s.pf_ao); freep(s.pf_h); freep(s.pf_hn);
         freep(s.pf_routed); freep(s.pf_q); freep(s.pf_k); freep(s.pf_v); freep(s.pf_attn);
+        freep(s.pf_qraw); freep(s.pf_qgate);
         freep(s.pf_lin_qkv); freep(s.pf_lin_z); freep(s.pf_lin_alpha); freep(s.pf_lin_beta);
         freep(s.pf_lin_q); freep(s.pf_lin_k); freep(s.pf_lin_v); freep(s.pf_lin_gdn); freep(s.pf_lin_norm);
         freep(s.pf_aq81); freep(s.pf_aq81_q); freep(s.pf_mf_h);
@@ -64,6 +62,10 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         s.pf_k = s.alloc<bf16>((size_t)M * s.kvdim);
         s.pf_v = s.alloc<bf16>((size_t)M * s.kvdim);
         s.pf_attn = s.alloc<bf16>((size_t)M * s.qdim);
+        if (c.hybrid) {
+            s.pf_qraw = s.alloc<bf16>((size_t)M * s.qdim * 2);
+            s.pf_qgate = s.alloc<bf16>((size_t)M * s.qdim);
+        }
         s.pf_aq81 = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(H));
         s.pf_aq81_q = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(s.qdim));
         s.pf_mf_h = s.alloc<float>((size_t)M * c.moe_ffn);
@@ -166,9 +168,11 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                 if (!(pf_q4k_type(w.wq_type) && pf_q4k_type(w.wk_type) && pf_q4k_type(w.wv_type) &&
                       pf_q4k_type(w.wo_type)))
                     return false;
+                const int nq = w.q_has_gate ? s.qdim * 2 : s.qdim;
+                bf16* yq = w.q_has_gate ? s.pf_qraw : s.pf_q;
                 kernels::launch_quantize_q8_1_blocks_tile(s.pf_xn, s.pf_aq81, M, H, st);
                 kernels::launch_attn_qkv_mmvq_q4k_tile(s.pf_aq81, w.wq, w.wk, w.wv,
-                    s.pf_q, s.pf_k, s.pf_v, M, s.qdim, s.kvdim, s.kvdim, H, st);
+                    yq, s.pf_k, s.pf_v, M, nq, s.kvdim, s.kvdim, H, st);
 
                 void* kpool = (char*)s.kv->k_pool() + (size_t)L * s.kv->layer_stride_elems() * kv_elem;
                 void* vpool = (char*)s.kv->v_pool() + (size_t)L * s.kv->layer_stride_elems() * kv_elem;
@@ -184,15 +188,27 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                     cu(cudaMemcpyAsync(s.d_seqlen, &s.h_scalars[3], sizeof(int), cudaMemcpyHostToDevice, st), "pf d_seqlen");
 
                     bf16* q = s.pf_q + (size_t)t * s.qdim;
+                    bf16* qraw = s.pf_qraw + (size_t)t * s.qdim * 2;
+                    bf16* qgate = s.pf_qgate + (size_t)t * s.qdim;
                     bf16* k = s.pf_k + (size_t)t * s.kvdim;
                     bf16* v = s.pf_v + (size_t)t * s.kvdim;
                     bf16* attn = s.pf_attn + (size_t)t * s.qdim;
 
+                    if (w.q_has_gate)
+                        kernels::launch_qwen36_split_q_gate(qraw, q, qgate, c.n_q_heads, c.head_dim, st);
+
                     if (partial_rope && kv8 && s.use_qkfuse) {
-                        kernels::launch_qknorm_rope_kv_partial_int8(q, k, v, w.q_norm, w.k_norm,
-                            kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
-                            c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
-                            s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                        if (w.q_has_gate) {
+                            kernels::launch_qknorm_rope_kv_partial_int8_gated(qraw, q, qgate, k, v,
+                                w.q_norm, w.k_norm, kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
+                                c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
+                                s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                        } else {
+                            kernels::launch_qknorm_rope_kv_partial_int8(q, k, v, w.q_norm, w.k_norm,
+                                kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
+                                c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
+                                s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                        }
                     } else {
                         return false;
                     }
@@ -212,8 +228,10 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                             s.fa_m, s.fa_l, s.fa_acc, 1, c.n_q_heads, c.n_kv_heads, c.head_dim,
                             s.kv->block_size(), s.kv->max_blocks_per_seq(), s.n_splits,
                             1.f / sqrtf((float)c.head_dim), st, nullptr, seqlen,
-                            kscale, vscale, kv8 ? 1 : 0, nullptr);
+                            kscale, vscale, kv8 ? 1 : 0, w.q_has_gate ? qgate : nullptr);
                     }
+                    if (w.q_has_gate)
+                        kernels::launch_qwen36_mul_sigmoid(attn, qgate, s.qdim, st);
                 }
                 kernels::launch_quantize_q8_1_blocks_tile(s.pf_attn, s.pf_aq81_q, M, s.qdim, st);
                 kernels::launch_mmvq_q4k_tile(s.pf_aq81_q, w.wo, s.pf_ao, M, H, s.qdim, st);

@@ -180,6 +180,7 @@ struct Qwen35Model::Impl {
     bf16 *pf_x = nullptr, *pf_xn = nullptr, *pf_ao = nullptr, *pf_h = nullptr, *pf_hn = nullptr;
     bf16 *pf_routed = nullptr;
     bf16 *pf_q = nullptr, *pf_k = nullptr, *pf_v = nullptr, *pf_attn = nullptr;
+    bf16 *pf_qraw = nullptr, *pf_qgate = nullptr;
     bf16 *pf_lin_qkv = nullptr, *pf_lin_z = nullptr, *pf_lin_alpha = nullptr, *pf_lin_beta = nullptr;
     bf16 *pf_lin_q = nullptr, *pf_lin_k = nullptr, *pf_lin_v = nullptr, *pf_lin_gdn = nullptr, *pf_lin_norm = nullptr;
     void* pf_aq81 = nullptr;
@@ -337,6 +338,7 @@ Qwen35Model::~Qwen35Model() {
     cudaFree(p_->pf_toks); cudaFree(p_->pf_pos);
     cudaFree(p_->pf_x); cudaFree(p_->pf_xn); cudaFree(p_->pf_ao); cudaFree(p_->pf_h); cudaFree(p_->pf_hn);
     cudaFree(p_->pf_routed); cudaFree(p_->pf_q); cudaFree(p_->pf_k); cudaFree(p_->pf_v); cudaFree(p_->pf_attn);
+    cudaFree(p_->pf_qraw); cudaFree(p_->pf_qgate);
     cudaFree(p_->pf_lin_qkv); cudaFree(p_->pf_lin_z); cudaFree(p_->pf_lin_alpha); cudaFree(p_->pf_lin_beta);
     cudaFree(p_->pf_lin_q); cudaFree(p_->pf_lin_k); cudaFree(p_->pf_lin_v); cudaFree(p_->pf_lin_gdn); cudaFree(p_->pf_lin_norm);
     cudaFree(p_->pf_aq81); cudaFree(p_->pf_aq81_q); cudaFree(p_->pf_mf_h);

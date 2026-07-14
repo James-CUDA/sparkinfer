@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
     }
 
     if (!model.prefill_batched(prompt)) {
-        printf("SKIP batched prefill not implemented yet (stub returned false)\n");
+        printf("SKIP batched prefill unavailable (guards failed or unsupported config)\n");
         printf("loop reference: first=%d last=%d\n", loop_next.front(), loop_next.back());
         return 0;
     }
