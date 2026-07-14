@@ -17,8 +17,10 @@
 #include "sparkinfer/kernels/gemm.h"
 #include "sparkinfer/kernels/fused.h"
 #include "sparkinfer/kernels/moe.h"
+#include "sparkinfer/kernels/prefill.h"
 #include "sparkinfer/kernels/quant.h"
 #include "sparkinfer/kernels/proj_requant.h"
+#include "qwen35_prefill.h"
 
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -1054,7 +1056,23 @@ Qwen35Model::BenchDecodeResult Qwen35Model::bench_decode(int warmup, int n, int 
     int pos = 0, tok = 100;
     if (start_pos > 0) {
         auto p0 = std::chrono::high_resolution_clock::now();
-        for (; pos < start_pos; pos++) { tok = forward_token(tok, pos); if (tok < 0 || tok >= s.cfg.vocab) tok = 100; }
+        bool batched_ok = false;
+        if (qwen35_prefill::enabled() && start_pos <= qwen35_prefill::max_context()) {
+            std::vector<int> prompt((size_t)start_pos, 100);
+            batched_ok = prefill_batched(prompt);
+            if (batched_ok) {
+                pos = start_pos;
+                tok = 100;
+            }
+        }
+        if (!batched_ok) {
+            pos = 0;
+            tok = 100;
+            for (; pos < start_pos; pos++) {
+                tok = forward_token(tok, pos);
+                if (tok < 0 || tok >= s.cfg.vocab) tok = 100;
+            }
+        }
         cudaDeviceSynchronize();
         auto p1 = std::chrono::high_resolution_clock::now();
         out.prefill_pp = start_pos / std::chrono::duration<double>(p1 - p0).count();
@@ -1092,6 +1110,29 @@ Qwen35Model::BenchDecodeResult Qwen35Model::bench_decode(int warmup, int n, int 
     double secs = std::chrono::duration<double>(t1 - t0).count();
     out.decode_tps = n / secs;
     return out;
+}
+
+bool Qwen35Model::prefill_batched(const std::vector<int>& tokens) {
+    Impl& s = *p_;
+    if (tokens.empty()) return false;
+    if (!s.kv->allocate(s.seq_id, s.cfg.max_seq)) return false;
+
+    kernels::BatchedPrefillConfig kcfg{};
+    const Qwen35Config& c = s.cfg;
+    kcfg.hidden = c.hidden;
+    kcfg.n_layers = c.n_layers;
+    kcfg.n_q_heads = c.n_q_heads;
+    kcfg.n_kv_heads = c.n_kv_heads;
+    kcfg.head_dim = c.head_dim;
+    kcfg.vocab = c.vocab;
+    kcfg.full_attn_interval = c.full_attn_interval;
+    kcfg.hybrid = c.hybrid;
+    kcfg.rms_eps = c.rms_eps;
+    kcfg.rope_theta = c.rope_theta;
+
+    return kernels::launch_batched_prefill(
+        kcfg, tokens.data(), (int)tokens.size(),
+        s.kv, s.seq_id, s.stream);
 }
 
 std::vector<int> Qwen35Model::generate(const std::vector<int>& prompt, int max_new, ThermalGovernor* gov) {

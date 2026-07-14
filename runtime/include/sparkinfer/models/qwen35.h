@@ -103,6 +103,10 @@ public:
     // Benchmark at a target KV depth: timed prefill, untimed warmup decode, timed decode.
     BenchDecodeResult bench_decode(int warmup, int n_tokens, int context_tokens = 0);
 
+    // Batched weight-amortized prompt prefill (SPARKINFER_PREFILL_BATCHED=1). Returns false
+    // until the tile-GEMM path is implemented — caller falls back to forward_token loop.
+    bool prefill_batched(const std::vector<int>& tokens);
+
     const Qwen35Config& config() const;
 
 private:
