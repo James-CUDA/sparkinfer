@@ -98,6 +98,17 @@ void launch_attn_qkv_mmvq_q4k(const void* q81,
     const void* Wq, const void* Wk, const void* Wv,
     void* yq, void* yk, void* yv,
     int Nq, int Nk, int Nv, int K, cudaStream_t stream = nullptr);
+
+// Batched-prefill tile path: M token rows share each Q4_K weight row load (y is [M,N] row-major).
+// q81 holds M contiguous llama_q8_1_bytes(K) activations. M==1 delegates to launch_mmvq_q4k.
+void launch_quantize_q8_1_blocks_tile(const void* x, void* y, int rows, int K,
+                                        cudaStream_t stream = nullptr);
+void launch_mmvq_q4k_tile(const void* q81, const void* W, void* y,
+                          int M, int N, int K, cudaStream_t stream = nullptr);
+void launch_attn_qkv_mmvq_q4k_tile(const void* q81,
+    const void* Wq, const void* Wk, const void* Wv,
+    void* yq, void* yk, void* yv,
+    int M, int Nq, int Nk, int Nv, int K, cudaStream_t stream = nullptr);
 // 1-warp-per-row Q6_K dp4a GEMV (large-N, e.g. LM head): GEMV_WPB rows/block.
 void launch_gemv_q6k_dp4a_f32(const void* q81, const void* W, float* y, int N, int K, cudaStream_t stream = nullptr);
 

@@ -832,6 +832,119 @@ template __global__ void si_attn_qkv_mmvq_q4k_kernel<__nv_bfloat16, 8>(const si_
 template __global__ void si_attn_qkv_mmvq_q4k_kernel<__nv_bfloat16, 16>(const si_block_q8_1*, const unsigned char*,
     const unsigned char*, const unsigned char*, __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, int, int, int);
 
+// Batched-prefill tile GEMM: one block per output row, inner loop over M token rows reuses
+// the Q4_K weight superblock loads (weight-amortized prompt ingest).
+template <typename OutT, int NSUPER>
+__global__ void si_mmvq_q4k_tile_kernel(const si_block_q8_1* __restrict__ vy,
+                                        const unsigned char* __restrict__ W,
+                                        OutT* __restrict__ y, int M, int N) {
+    constexpr int NW = 4, WS = 32, vdr = 2, qi = 32;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, tid = threadIdx.x;
+    const int row = blockIdx.x;
+    if (row >= N) return;
+    const si_block_q4_K* w_row = (const si_block_q4_K*)(W + (size_t)row * NSUPER * 144);
+    constexpr int blocks_per_iter = vdr * NW * WS / qi;
+    for (int m = 0; m < M; ++m) {
+        const si_block_q8_1* vy_m = vy + (size_t)m * NSUPER;
+        float tmp = 0.0f;
+        #pragma unroll
+        for (int kbx = tid / (qi / vdr); kbx < NSUPER; kbx += blocks_per_iter) {
+            const int kby = kbx * 8;
+            const int kqs = vdr * (tid % (qi / vdr));
+            tmp += si_vec_dot_q4_K(w_row + kbx, vy_m + kby, kqs);
+        }
+        __shared__ float tmp_shared[NW - 1][WS];
+        if (warp > 0) tmp_shared[warp - 1][lane] = tmp;
+        __syncthreads();
+        if (warp == 0) {
+            #pragma unroll
+            for (int l = 0; l < NW - 1; l++) tmp += tmp_shared[l][lane];
+            #pragma unroll
+            for (int sh = 16; sh > 0; sh >>= 1) tmp += __shfl_xor_sync(0xffffffff, tmp, sh);
+            if (lane == 0) gemv_write(y + (size_t)m * N + row, tmp);
+        }
+        __syncthreads();
+    }
+}
+template __global__ void si_mmvq_q4k_tile_kernel<__nv_bfloat16, 8>(const si_block_q8_1*, const unsigned char*,
+                                                                   __nv_bfloat16*, int, int);
+template __global__ void si_mmvq_q4k_tile_kernel<float, 8>(const si_block_q8_1*, const unsigned char*, float*, int, int);
+template __global__ void si_mmvq_q4k_tile_kernel<__nv_bfloat16, 16>(const si_block_q8_1*, const unsigned char*,
+                                                                    __nv_bfloat16*, int, int);
+template __global__ void si_mmvq_q4k_tile_kernel<float, 16>(const si_block_q8_1*, const unsigned char*, float*, int, int);
+
+template <typename OutT, int NSUPER>
+__global__ void si_attn_qkv_mmvq_q4k_tile_kernel(
+    const si_block_q8_1* __restrict__ vy,
+    const unsigned char* __restrict__ Wq, const unsigned char* __restrict__ Wk,
+    const unsigned char* __restrict__ Wv,
+    OutT* __restrict__ yq, OutT* __restrict__ yk, OutT* __restrict__ yv,
+    int M, int Nq, int Nk, int Nv) {
+    constexpr int NW = 4, WS = 32, vdr = 2, qi = 32;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, tid = threadIdx.x;
+    const int row = blockIdx.x;
+    const int nq = Nq, nk = Nq + Nk, total = nk + Nv;
+    if (row >= total) return;
+    const unsigned char* W;
+    OutT* y;
+    int lrow, outN;
+    if (row < nq)       { W = Wq; y = yq; lrow = row; outN = Nq; }
+    else if (row < nk)  { W = Wk; y = yk; lrow = row - Nq; outN = Nk; }
+    else                { W = Wv; y = yv; lrow = row - nk; outN = Nv; }
+    const si_block_q4_K* w_row = (const si_block_q4_K*)(W + (size_t)lrow * NSUPER * 144);
+    constexpr int blocks_per_iter = vdr * NW * WS / qi;
+    for (int m = 0; m < M; ++m) {
+        const si_block_q8_1* vy_m = vy + (size_t)m * NSUPER;
+        float tmp = 0.0f;
+        #pragma unroll
+        for (int kbx = tid / (qi / vdr); kbx < NSUPER; kbx += blocks_per_iter) {
+            const int kby = kbx * 8;
+            const int kqs = vdr * (tid % (qi / vdr));
+            tmp += si_vec_dot_q4_K(w_row + kbx, vy_m + kby, kqs);
+        }
+        __shared__ float tmp_shared[NW - 1][WS];
+        if (warp > 0) tmp_shared[warp - 1][lane] = tmp;
+        __syncthreads();
+        if (warp == 0) {
+            #pragma unroll
+            for (int l = 0; l < NW - 1; l++) tmp += tmp_shared[l][lane];
+            #pragma unroll
+            for (int sh = 16; sh > 0; sh >>= 1) tmp += __shfl_xor_sync(0xffffffff, tmp, sh);
+            if (lane == 0) gemv_write(y + (size_t)m * outN + lrow, tmp);
+        }
+        __syncthreads();
+    }
+}
+template __global__ void si_attn_qkv_mmvq_q4k_tile_kernel<__nv_bfloat16, 8>(const si_block_q8_1*,
+    const unsigned char*, const unsigned char*, const unsigned char*,
+    __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, int, int, int, int);
+template __global__ void si_attn_qkv_mmvq_q4k_tile_kernel<__nv_bfloat16, 16>(const si_block_q8_1*,
+    const unsigned char*, const unsigned char*, const unsigned char*,
+    __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, int, int, int, int);
+
+__global__ void si_quantize_q8_1_blocks_tile(const __nv_bfloat16* __restrict__ x,
+                                             si_block_q8_1* __restrict__ y,
+                                             int rows, int K) {
+    const int nblocks = K >> 5;
+    const int warpsPB = blockDim.x >> 5;
+    const int ib = blockIdx.x * warpsPB + (threadIdx.x >> 5);
+    const int lane = threadIdx.x & 31;
+    const int row = blockIdx.y;
+    if (row >= rows || ib >= nblocks) return;
+    const __nv_bfloat16* xr = x + (size_t)row * K;
+    si_block_q8_1* yr = y + (size_t)row * nblocks;
+    float xv = __bfloat162float(xr[ib * 32 + lane]), a = fabsf(xv);
+    #pragma unroll
+    for (int m = 16; m > 0; m >>= 1) a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, m));
+    float d = a / 127.0f;
+    int qi = (a == 0.0f) ? 0 : (int)roundf(xv / d);
+    yr[ib].qs[lane] = (signed char)qi;
+    int s = qi;
+    #pragma unroll
+    for (int m = 16; m > 0; m >>= 1) s += __shfl_xor_sync(0xffffffffu, s, m);
+    if (lane == 0) yr[ib].ds = __floats2half2_rn(d, d * (float)s);
+}
+
 // ===== faithful llama Q6_K mmvq for the fp32-path GEMVs (attn-V upgrades + LM head) =====
 // Same 4-warp-per-row structure as the Q4_K mmvq, with vec_dot_q6_K_q8_1 (coalesced
 // ql/qh int loads + __vsubss4 reconstruct + dp4a). Mirrors the #65 MoE-down dot.
@@ -1319,6 +1432,72 @@ void launch_attn_qkv_mmvq_q4k(const void* q81,
         launch_mmvq_q4k(q81, Wq, yq, Nq, K, stream);
         launch_mmvq_q4k(q81, Wk, yk, Nk, K, stream);
         launch_mmvq_q4k(q81, Wv, yv, Nv, K, stream);
+    }
+}
+
+void launch_quantize_q8_1_blocks_tile(const void* x, void* y, int rows, int K, cudaStream_t stream) {
+    if (rows <= 0 || K <= 0) return;
+    if (rows == 1) {
+        launch_quantize_q8_1_blocks(x, y, K, stream);
+        return;
+    }
+    const int nblocks = K >> 5, warpsPB = 8;
+    dim3 grid((nblocks + warpsPB - 1) / warpsPB, rows);
+    si_quantize_q8_1_blocks_tile<<<grid, warpsPB * 32, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(x),
+        reinterpret_cast<si_block_q8_1*>(y), rows, K);
+}
+
+void launch_mmvq_q4k_tile(const void* q81, const void* W, void* y,
+                          int M, int N, int K, cudaStream_t stream) {
+    if (M <= 0 || N <= 0) return;
+    if (M == 1) {
+        launch_mmvq_q4k(q81, W, y, N, K, stream);
+        return;
+    }
+    const si_block_q8_1* q = reinterpret_cast<const si_block_q8_1*>(q81);
+    const unsigned char* w = reinterpret_cast<const unsigned char*>(W);
+    __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(y);
+    if (K == 2048)
+        si_mmvq_q4k_tile_kernel<__nv_bfloat16, 8><<<N, 4 * 32, 0, stream>>>(q, w, out, M, N);
+    else if (K == 4096)
+        si_mmvq_q4k_tile_kernel<__nv_bfloat16, 16><<<N, 4 * 32, 0, stream>>>(q, w, out, M, N);
+    else {
+        for (int m = 0; m < M; ++m)
+            launch_mmvq_q4k(q + (size_t)m * (K >> 5), W, out + (size_t)m * N, N, K, stream);
+    }
+}
+
+void launch_attn_qkv_mmvq_q4k_tile(const void* q81,
+    const void* Wq, const void* Wk, const void* Wv,
+    void* yq, void* yk, void* yv,
+    int M, int Nq, int Nk, int Nv, int K, cudaStream_t stream) {
+    if (M <= 0) return;
+    if (M == 1) {
+        launch_attn_qkv_mmvq_q4k(q81, Wq, Wk, Wv, yq, yk, yv, Nq, Nk, Nv, K, stream);
+        return;
+    }
+    const int total = Nq + Nk + Nv;
+    const si_block_q8_1* q = reinterpret_cast<const si_block_q8_1*>(q81);
+    if (K == 2048)
+        si_attn_qkv_mmvq_q4k_tile_kernel<__nv_bfloat16, 8><<<total, 4 * 32, 0, stream>>>(
+            q, reinterpret_cast<const unsigned char*>(Wq), reinterpret_cast<const unsigned char*>(Wk),
+            reinterpret_cast<const unsigned char*>(Wv),
+            reinterpret_cast<__nv_bfloat16*>(yq), reinterpret_cast<__nv_bfloat16*>(yk),
+            reinterpret_cast<__nv_bfloat16*>(yv), M, Nq, Nk, Nv);
+    else if (K == 4096)
+        si_attn_qkv_mmvq_q4k_tile_kernel<__nv_bfloat16, 16><<<total, 4 * 32, 0, stream>>>(
+            q, reinterpret_cast<const unsigned char*>(Wq), reinterpret_cast<const unsigned char*>(Wk),
+            reinterpret_cast<const unsigned char*>(Wv),
+            reinterpret_cast<__nv_bfloat16*>(yq), reinterpret_cast<__nv_bfloat16*>(yk),
+            reinterpret_cast<__nv_bfloat16*>(yv), M, Nq, Nk, Nv);
+    else {
+        for (int m = 0; m < M; ++m) {
+            const size_t off = (size_t)m * (K >> 5);
+            launch_attn_qkv_mmvq_q4k(q + off, Wq, Wk, Wv,
+                (char*)yq + (size_t)m * Nq * 2, (char*)yk + (size_t)m * Nk * 2,
+                (char*)yv + (size_t)m * Nv * 2, Nq, Nk, Nv, K, stream);
+        }
     }
 }
 #endif
