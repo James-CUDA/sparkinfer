@@ -1,8 +1,8 @@
-// A/B correctness harness: batched prefill vs forward_token loop.
+// A/B correctness harness: batched prefill vs teacher-forced forward_token loop.
 // Usage: qwen3_gguf_prefill_check <model.gguf> <n_tokens>
 //
-// With SPARKINFER_PREFILL_BATCHED=1, compares greedy argmax chain after batched
-// ingest vs the token loop. Exits 0 on match, 1 on divergence (once implemented).
+// With SPARKINFER_PREFILL_BATCHED=1, compares first decode step + logits after
+// batched ingest vs the token loop. Exits 0 on match, 1 on divergence.
 
 #include "sparkinfer/runtime.h"
 #include "sparkinfer/kv_cache.h"
@@ -12,9 +12,29 @@
 #include "qwen3_gguf_config.h"
 
 #include <cuda_runtime.h>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+
+static int argmax(const float* logits, int vocab) {
+    int best = 0;
+    float bv = logits[0];
+    for (int i = 1; i < vocab; i++) {
+        if (logits[i] > bv) { bv = logits[i]; best = i; }
+    }
+    return best;
+}
+
+static float kl_div(const float* p, const float* q, int n) {
+    double kl = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double pi = std::exp((double)p[i]);
+        const double qi = std::exp((double)q[i]);
+        if (pi > 1e-30) kl += pi * (std::log(pi) - std::log(std::max(qi, 1e-30)));
+    }
+    return (float)kl;
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -73,29 +93,48 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<int> prompt((size_t)n_tokens, 100);
+    std::vector<int> prompt((size_t)n_tokens);
+    for (int i = 0; i < n_tokens; i++) prompt[(size_t)i] = 100 + (i % 17);
 
-    // Reference: token loop
-    std::vector<int> loop_next;
-    loop_next.reserve((size_t)n_tokens);
-    int tok = 100;
-    for (int i = 0; i < n_tokens; i++) {
-        tok = model.forward_token(tok, i);
-        loop_next.push_back(tok);
-    }
+    const int decode_probe = 100;
+    std::vector<float> logits_ref((size_t)cfg.vocab), logits_bat((size_t)cfg.vocab);
+
+    // Reference: teacher-forced token loop through the prompt.
+    for (int i = 0; i < n_tokens; i++)
+        (void)model.forward_token(prompt[(size_t)i], i);
+    const int dec_ref = model.forward_token(decode_probe, n_tokens);
+    model.copy_logits(logits_ref.data());
 
     if (!getenv("SPARKINFER_PREFILL_BATCHED") || getenv("SPARKINFER_PREFILL_BATCHED")[0] != '1') {
         printf("SKIP batched path (set SPARKINFER_PREFILL_BATCHED=1)\n");
-        printf("loop reference: first=%d last=%d\n", loop_next.front(), loop_next.back());
+        printf("loop decode@%d=%d\n", n_tokens, dec_ref);
         return 0;
+    }
+
+    kv.free(0);
+    if (!kv.allocate(0, cfg.max_seq)) {
+        printf("[FAIL] KV re-allocate\n");
+        return 1;
     }
 
     if (!model.prefill_batched(prompt)) {
         printf("SKIP batched prefill unavailable (guards failed or unsupported config)\n");
-        printf("loop reference: first=%d last=%d\n", loop_next.front(), loop_next.back());
         return 0;
     }
 
-    printf("[FAIL] batched path ran but post-check not implemented\n");
-    return 1;
+    const int dec_bat = model.forward_token(decode_probe, n_tokens);
+    model.copy_logits(logits_bat.data());
+
+    const int am_ref = argmax(logits_ref.data(), cfg.vocab);
+    const int am_bat = argmax(logits_bat.data(), cfg.vocab);
+    const float kl = kl_div(logits_ref.data(), logits_bat.data(), cfg.vocab);
+
+    printf("decode@%d ref=%d bat=%d %s\n", n_tokens, dec_ref, dec_bat,
+           dec_ref == dec_bat ? "OK" : "MISMATCH");
+    printf("argmax ref=%d bat=%d %s\n", am_ref, am_bat, am_ref == am_bat ? "OK" : "MISMATCH");
+    printf("KL %.6f\n", kl);
+
+    const bool ok = (dec_ref == dec_bat) && (am_ref == am_bat) && (kl < 1e-3f);
+    printf("%s batched prefill parity (n=%d)\n", ok ? "PASS" : "FAIL", n_tokens);
+    return ok ? 0 : 1;
 }
