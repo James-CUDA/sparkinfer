@@ -1,6 +1,4 @@
 // Chunked batched-prefill orchestration (included from qwen35.cpp).
-// Uses tile Q4_K GEMMs (launch_mmvq_q4k_tile / launch_attn_qkv_mmvq_q4k_tile) over
-// SPARKINFER_PREFILL_TILE_ROWS token rows; GDN scan + flash-decode stay per-token.
 
 namespace {
 
@@ -65,6 +63,8 @@ static void ensure_pf_bufs(Qwen35Model::Impl& s, int M) {
 }
 
 static bool pf_q4k_type(int t) { return t == 12; }
+
+} // namespace
 
 bool qwen35_batched_prefill_impl(Qwen35Model::Impl& s, const std::vector<int>& tokens) {
     if (tokens.empty()) return false;
@@ -236,5 +236,3 @@ bool qwen35_batched_prefill_impl(Qwen35Model::Impl& s, const std::vector<int>& t
         fprintf(stderr, "[batched_prefill] ingested n=%d tile_rows=%d\n", n, TILE);
     return true;
 }
-
-} // namespace

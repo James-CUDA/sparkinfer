@@ -186,6 +186,8 @@ struct Qwen35Model::Impl {
     void* pf_aq81_q = nullptr;
     float* pf_mf_h = nullptr;
 
+    friend bool qwen35_batched_prefill_impl(Impl& s, const std::vector<int>& tokens);
+
     template <class T> T* alloc(size_t n) { void* p=nullptr; cu(cudaMalloc(&p, n*sizeof(T)), "malloc"); return (T*)p; }
 };
 
@@ -1131,9 +1133,7 @@ Qwen35Model::BenchDecodeResult Qwen35Model::bench_decode(int warmup, int n, int 
     return out;
 }
 
-namespace {
 bool qwen35_batched_prefill_impl(Qwen35Model::Impl& s, const std::vector<int>& tokens);
-}
 
 bool Qwen35Model::prefill_batched(const std::vector<int>& tokens) {
     return qwen35_batched_prefill_impl(*p_, tokens);
