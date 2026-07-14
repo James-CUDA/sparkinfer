@@ -1133,12 +1133,6 @@ Qwen35Model::BenchDecodeResult Qwen35Model::bench_decode(int warmup, int n, int 
     return out;
 }
 
-bool qwen35_batched_prefill_impl(Qwen35Model::Impl& s, const std::vector<int>& tokens);
-
-bool Qwen35Model::prefill_batched(const std::vector<int>& tokens) {
-    return qwen35_batched_prefill_impl(*p_, tokens);
-}
-
 std::vector<int> Qwen35Model::generate(const std::vector<int>& prompt, int max_new, ThermalGovernor* gov) {
     Impl& s = *p_;
     std::vector<int> out;
@@ -1638,5 +1632,9 @@ bool Qwen35Model::load_gguf(const std::string& path) {
 }
 
 #include "qwen35_batched_prefill.inl"
+
+bool Qwen35Model::prefill_batched(const std::vector<int>& tokens) {
+    return qwen35_batched_prefill_impl(*p_, tokens);
+}
 
 } // namespace sparkinfer
