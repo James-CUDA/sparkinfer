@@ -270,7 +270,8 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
             kernels::launch_quantize_q8_1_blocks_tile(s.pf_hn, s.pf_aq81, M, H, st);
             kernels::launch_moe_expert_ffn_q4k(s.pf_hn, w.gate_q, w.up_q, w.down_q,
                 w.gate_qtype, w.up_qtype, w.down_qtype,
-                s.mf_ids, s.mf_weights, s.pf_routed, s.pf_mf_h, s.pf_ffn_scratch,
+                s.mf_ids, s.mf_weights, s.pf_routed, s.pf_mf_h,
+                reinterpret_cast<float*>(s.pf_ffn_scratch),
                 M, c.top_k, H, c.moe_ffn, s.pf_aq81, st);
 
             const void* nextnorm = (L + 1 < c.n_layers) ? s.w.layers[L + 1].input_norm : s.w.final_norm;
