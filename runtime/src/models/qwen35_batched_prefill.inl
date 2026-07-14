@@ -197,24 +197,31 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                     if (w.q_has_gate)
                         kernels::launch_qwen36_split_q_gate(qraw, q, qgate, c.n_q_heads, c.head_dim, st);
 
-                    if (partial_rope && kv8 && s.use_qkfuse) {
-                        if (w.q_has_gate) {
-                            kernels::launch_qknorm_rope_kv_partial_int8_gated(qraw, q, qgate, k, v,
-                                w.q_norm, w.k_norm, kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
-                                c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
-                                s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                    if (partial_rope && s.use_qkfuse) {
+                        if (kv8) {
+                            if (w.q_has_gate) {
+                                kernels::launch_qknorm_rope_kv_partial_int8_gated(qraw, q, qgate, k, v,
+                                    w.q_norm, w.k_norm, kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
+                                    c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
+                                    s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                            } else {
+                                kernels::launch_qknorm_rope_kv_partial_int8(q, k, v, w.q_norm, w.k_norm,
+                                    kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
+                                    c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
+                                    s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                            }
                         } else {
-                            kernels::launch_qknorm_rope_kv_partial_int8(q, k, v, w.q_norm, w.k_norm,
-                                kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
-                                c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
-                                s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                            kernels::launch_qknorm_rope_kv_partial(q, k, v, w.q_norm, w.k_norm,
+                                (bf16*)kpool, (bf16*)vpool, btable, s.d_pos, 1,
+                                c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim,
+                                c.rope_theta, c.rms_eps, s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
                         }
                     } else {
                         return false;
                     }
 
                     const bool sparse_on = sparse_avail && seqlen >= s.sparse_min_ctx;
-                    if (sparse_on) {
+                    if (sparse_on && kv8) {
                         kernels::launch_fa_kv_window_select(s.d_seqlen, s.sparse_sel, c.n_kv_heads,
                             s.kv->block_size(), s.sparse_budget, s.sparse_window, st);
                         kernels::launch_flash_decode_split_sparse(q, kpool, vpool, btable, s.d_seqlen,
