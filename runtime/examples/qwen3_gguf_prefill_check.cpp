@@ -68,6 +68,10 @@ int main(int argc, char** argv) {
         printf("[FAIL] load\n");
         return 1;
     }
+    if (!kv.allocate(0, cfg.max_seq)) {
+        printf("[FAIL] KV allocate (max_seq=%d)\n", cfg.max_seq);
+        return 1;
+    }
 
     std::vector<int> prompt((size_t)n_tokens, 100);
 
