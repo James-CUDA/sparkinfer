@@ -20,6 +20,7 @@
 #include <fstream>
 #include <unordered_map>
 #include <algorithm>
+#include <vector>
 
 static bool ends_with(const std::string& s, const std::string& suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
@@ -75,6 +76,26 @@ int main(int argc, char** argv) {
     bool ok = gguf_mode ? model.load_gguf(path) : model.load_weights(path);
     if (!ok) { printf("[FAIL] load\n"); return 1; }
     size_t freeb=0, totb=0; cudaMemGetInfo(&freeb,&totb);
+
+    const int suffix_len = (context_tokens > 0 && getenv("SPARKINFER_BENCH_PREFIX_TTFT"))
+        ? std::max(0, atoi(getenv("SPARKINFER_BENCH_PREFIX_TTFT")))
+        : 0;
+    if (suffix_len > 0 && context_tokens > suffix_len) {
+        std::vector<int> prefix((size_t)(context_tokens - suffix_len), 100);
+        std::vector<int> full((size_t)context_tokens, 100);
+        model.clear_prefix_cache();
+        double cold = model.bench_ttft(full);
+        if (!model.cache_prefix(prefix)) {
+            printf("[FAIL] cache_prefix(%d tokens)\n", (int)prefix.size());
+            return 1;
+        }
+        double warm = model.bench_ttft(full);
+        model.clear_prefix_cache();
+        printf("prefix_ttft  : cold %.3f s (full %d tok) · warm %.3f s (reuse %d + suffix %d)\n",
+               cold, context_tokens, warm, (int)prefix.size(), suffix_len);
+        if (warm > 0. && cold > 0.)
+            printf("prefix_speedup: %.1fx TTFT on cached prefix\n", cold / warm);
+    }
 
     auto bench = model.bench_decode(8, n_tokens, context_tokens);
     double toks = bench.decode_tps;
