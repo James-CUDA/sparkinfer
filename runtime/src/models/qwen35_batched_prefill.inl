@@ -24,20 +24,26 @@ static bool prefill_debug() {
 
 static bool pf_q4k_type(int t) { return t == 12; }
 
+static void pf_fail(const char* why) {
+    if (prefill_debug()) fprintf(stderr, "[batched_prefill] fallback: %s\n", why);
+}
+
 } // namespace
 
 bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
     Impl& s = *p_;
-    if (tokens.empty()) return false;
+    if (tokens.empty()) { pf_fail("empty"); return false; }
     const Qwen35Config& c = s.cfg;
     const int H = c.hidden;
-    if (!s.gguf || !s.use_llama || !s.use_pq || !c.dense_ffn || c.top_k != 1) return false;
-    if (H != 2048 && H != 4096) return false;
-    if (!s.kv->allocate(s.seq_id, c.max_seq)) return false;
-    if (c.n_shared > 0) return false;
+    if (!s.gguf || !s.use_llama || !s.use_pq || !c.dense_ffn || c.top_k != 1) {
+        pf_fail("guards"); return false;
+    }
+    if (H != 2048 && H != 4096) { pf_fail("hidden"); return false; }
+    if (!s.kv->allocate(s.seq_id, c.max_seq)) { pf_fail("kv"); return false; }
+    if (c.n_shared > 0) { pf_fail("shared"); return false; }
 
     const int TILE = prefill_tile_rows();
-    if (TILE <= 1) return false;
+    if (TILE <= 1) { pf_fail("tile_rows"); return false; }
 
     auto ensure_bufs = [&](int M) {
         if (M <= s.pf_tile_cap) return;
@@ -125,7 +131,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                     kernels::launch_mmvq_q4k_tile(s.pf_aq81, w.ssm_alpha, s.pf_lin_alpha, M, c.linear_v_heads, H, st);
                     kernels::launch_mmvq_q4k_tile(s.pf_aq81, w.ssm_beta, s.pf_lin_beta, M, c.linear_v_heads, H, st);
                 } else {
-                    return false;
+                    pf_fail("gdn qtypes"); return false;
                 }
 
                 for (int t = 0; t < M; ++t) {
