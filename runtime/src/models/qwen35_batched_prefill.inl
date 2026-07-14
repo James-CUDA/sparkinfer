@@ -33,6 +33,15 @@ static void pf_fail(const char* why) {
 bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
     Impl& s = *p_;
     if (tokens.empty()) { pf_fail("empty"); return false; }
+    // Batched ingest fills KV outside the decode CUDA graph; drop any capture so the
+    // next forward_token() re-captures from the batched KV state.
+    if (s.graph_ready) {
+        cudaGraphExecDestroy(s.cu_exec);
+        cudaGraphDestroy(s.cu_graph);
+        s.cu_exec = nullptr;
+        s.cu_graph = nullptr;
+        s.graph_ready = false;
+    }
     const Qwen35Config& c = s.cfg;
     const int H = c.hidden;
     if (!s.gguf || !s.use_llama || !s.use_pq || !c.dense_ffn || c.top_k != 1) {

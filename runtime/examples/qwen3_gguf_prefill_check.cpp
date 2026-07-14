@@ -36,6 +36,20 @@ static float kl_div(const float* p, const float* q, int n) {
     return (float)kl;
 }
 
+static void setup_kvc(sparkinfer::KVCacheConfig& kvc, const sparkinfer::Qwen35Config& cfg, int n_tokens) {
+    kvc.num_layers = cfg.n_layers;
+    kvc.num_kv_heads = cfg.n_kv_heads;
+    kvc.head_dim = cfg.head_dim;
+    kvc.block_size = 16;
+    kvc.int8_kv = n_tokens >= 4096;
+}
+
+static size_t kv_pool_bytes(const sparkinfer::Qwen35Config& cfg) {
+    const size_t epb = (size_t)16 * cfg.n_kv_heads * cfg.head_dim;
+    const size_t blocks = (cfg.max_seq + 15) / 16 + 8;
+    return (size_t)cfg.n_layers * 2 * epb * 2 * blocks;
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         printf("usage: %s <model.gguf> <n_tokens>\n", argv[0]);
@@ -65,15 +79,6 @@ int main(int argc, char** argv) {
 
     auto rt = sparkinfer::Runtime::create({});
     rt->initialize();
-    sparkinfer::KVCacheConfig kvc;
-    kvc.num_layers = cfg.n_layers;
-    kvc.num_kv_heads = cfg.n_kv_heads;
-    kvc.head_dim = cfg.head_dim;
-    kvc.block_size = 16;
-    kvc.int8_kv = n_tokens >= 4096;
-    const size_t epb = (size_t)16 * cfg.n_kv_heads * cfg.head_dim;
-    const size_t blocks = (cfg.max_seq + 15) / 16 + 8;
-    sparkinfer::KVCacheManager kv(kvc, (size_t)cfg.n_layers * 2 * epb * 2 * blocks);
 
     sparkinfer::moe::MoEConfig mc;
     mc.num_experts = cfg.n_experts;
@@ -83,27 +88,25 @@ int main(int argc, char** argv) {
     mc.num_layers = cfg.n_layers;
     auto engine = sparkinfer::moe::MoEEngine::create(mc);
 
-    sparkinfer::Qwen35Model model(cfg, &kv, engine.get());
-    if (!model.load_gguf(path)) {
-        printf("[FAIL] load\n");
-        return 1;
-    }
-    if (!kv.allocate(0, cfg.max_seq)) {
-        printf("[FAIL] KV allocate (max_seq=%d)\n", cfg.max_seq);
-        return 1;
-    }
-
     std::vector<int> prompt((size_t)n_tokens);
     for (int i = 0; i < n_tokens; i++) prompt[(size_t)i] = 100 + (i % 17);
 
     const int decode_probe = 100;
     std::vector<float> logits_ref((size_t)cfg.vocab), logits_bat((size_t)cfg.vocab);
 
-    // Reference: teacher-forced token loop through the prompt.
+    // Reference model: teacher-forced token loop (may capture decode graph).
+    sparkinfer::KVCacheConfig kvc_ref{};
+    setup_kvc(kvc_ref, cfg, n_tokens);
+    sparkinfer::KVCacheManager kv_ref(kvc_ref, kv_pool_bytes(cfg));
+    sparkinfer::Qwen35Model ref(cfg, &kv_ref, engine.get());
+    if (!ref.load_gguf(path) || !kv_ref.allocate(0, cfg.max_seq)) {
+        printf("[FAIL] ref load/allocate\n");
+        return 1;
+    }
     for (int i = 0; i < n_tokens; i++)
-        (void)model.forward_token(prompt[(size_t)i], i);
-    const int dec_ref = model.forward_token(decode_probe, n_tokens);
-    model.copy_logits(logits_ref.data());
+        (void)ref.forward_token(prompt[(size_t)i], i);
+    const int dec_ref = ref.forward_token(decode_probe, n_tokens);
+    ref.copy_logits(logits_ref.data());
 
     if (!getenv("SPARKINFER_PREFILL_BATCHED") || getenv("SPARKINFER_PREFILL_BATCHED")[0] != '1') {
         printf("SKIP batched path (set SPARKINFER_PREFILL_BATCHED=1)\n");
@@ -111,19 +114,21 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    kv.free(0);
-    if (!kv.allocate(0, cfg.max_seq)) {
-        printf("[FAIL] KV re-allocate\n");
+    // Batched model: fresh KV + no prior graph capture.
+    sparkinfer::KVCacheConfig kvc_bat{};
+    setup_kvc(kvc_bat, cfg, n_tokens);
+    sparkinfer::KVCacheManager kv_bat(kvc_bat, kv_pool_bytes(cfg));
+    sparkinfer::Qwen35Model bat(cfg, &kv_bat, engine.get());
+    if (!bat.load_gguf(path) || !kv_bat.allocate(0, cfg.max_seq)) {
+        printf("[FAIL] bat load/allocate\n");
         return 1;
     }
-
-    if (!model.prefill_batched(prompt)) {
+    if (!bat.prefill_batched(prompt)) {
         printf("SKIP batched prefill unavailable (guards failed or unsupported config)\n");
         return 0;
     }
-
-    const int dec_bat = model.forward_token(decode_probe, n_tokens);
-    model.copy_logits(logits_bat.data());
+    const int dec_bat = bat.forward_token(decode_probe, n_tokens);
+    bat.copy_logits(logits_bat.data());
 
     const int am_ref = argmax(logits_ref.data(), cfg.vocab);
     const int am_bat = argmax(logits_bat.data(), cfg.vocab);
