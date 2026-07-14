@@ -59,6 +59,8 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
     const int TILE = prefill_tile_rows();
     if (TILE <= 1) { pf_fail("tile_rows"); return false; }
 
+    cudaStream_t st = s.stream;
+
     auto ensure_bufs = [&](int M) {
         if (M <= s.pf_tile_cap) return;
         auto freep = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
@@ -69,6 +71,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         freep(s.pf_lin_qkv); freep(s.pf_lin_z); freep(s.pf_lin_alpha); freep(s.pf_lin_beta);
         freep(s.pf_lin_q); freep(s.pf_lin_k); freep(s.pf_lin_v); freep(s.pf_lin_gdn); freep(s.pf_lin_norm);
         freep(s.pf_aq81); freep(s.pf_aq81_q); freep(s.pf_ffn_scratch); freep(s.pf_mf_h);
+        freep(s.pf_mf_out); freep(s.pf_mf_ids); freep(s.pf_mf_weights);
         s.pf_tile_cap = M;
         s.pf_toks = s.alloc<int>(M);
         s.pf_pos = s.alloc<int>(M);
@@ -89,7 +92,17 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         s.pf_aq81 = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(H));
         s.pf_aq81_q = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(s.qdim));
         s.pf_ffn_scratch = s.alloc<char>((size_t)M * c.top_k * kernels::llama_q8_1_bytes(c.moe_ffn));
-        s.pf_mf_h = s.alloc<float>((size_t)M * c.moe_ffn);
+        s.pf_mf_h = s.alloc<float>((size_t)M * c.top_k * c.moe_ffn);
+        s.pf_mf_out = s.alloc<float>((size_t)M * H);
+        s.pf_mf_ids = s.alloc<int>((size_t)M * c.top_k);
+        s.pf_mf_weights = s.alloc<float>((size_t)M * c.top_k);
+        cu(cudaMemsetAsync(s.pf_mf_ids, 0, (size_t)M * c.top_k * sizeof(int), st), "pf mf_ids");
+        {
+            std::vector<float> ones((size_t)M * c.top_k, 1.f);
+            cu(cudaMemcpyAsync(s.pf_mf_weights, ones.data(),
+                               (size_t)M * c.top_k * sizeof(float), cudaMemcpyHostToDevice, st),
+               "pf mf_weights");
+        }
         if (c.hybrid) {
             s.pf_lin_qkv = s.alloc<bf16>((size_t)M * s.linear_qkvdim);
             s.pf_lin_z = s.alloc<bf16>((size_t)M * s.linear_vdim);
@@ -103,7 +116,6 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         }
     };
     ensure_bufs(TILE);
-    cudaStream_t st = s.stream;
     int* btable = s.kv->block_table(s.seq_id);
     const int n = (int)tokens.size();
 
@@ -270,7 +282,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
             kernels::launch_quantize_q8_1_blocks_tile(s.pf_hn, s.pf_aq81, M, H, st);
             kernels::launch_moe_expert_ffn_q4k(s.pf_hn, w.gate_q, w.up_q, w.down_q,
                 w.gate_qtype, w.up_qtype, w.down_qtype,
-                s.mf_ids, s.mf_weights, s.pf_routed, s.pf_mf_h,
+                s.pf_mf_ids, s.pf_mf_weights, s.pf_routed, s.pf_mf_h,
                 reinterpret_cast<float*>(s.pf_ffn_scratch),
                 M, c.top_k, H, c.moe_ffn, s.pf_aq81, st);
 
