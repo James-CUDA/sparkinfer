@@ -68,7 +68,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         freep(s.pf_qraw); freep(s.pf_qgate);
         freep(s.pf_lin_qkv); freep(s.pf_lin_z); freep(s.pf_lin_alpha); freep(s.pf_lin_beta);
         freep(s.pf_lin_q); freep(s.pf_lin_k); freep(s.pf_lin_v); freep(s.pf_lin_gdn); freep(s.pf_lin_norm);
-        freep(s.pf_aq81); freep(s.pf_aq81_q); freep(s.pf_mf_h);
+        freep(s.pf_aq81); freep(s.pf_aq81_q); freep(s.pf_ffn_scratch); freep(s.pf_mf_h);
         s.pf_tile_cap = M;
         s.pf_toks = s.alloc<int>(M);
         s.pf_pos = s.alloc<int>(M);
@@ -88,6 +88,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         }
         s.pf_aq81 = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(H));
         s.pf_aq81_q = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(s.qdim));
+        s.pf_ffn_scratch = s.alloc<char>((size_t)M * c.top_k * kernels::llama_q8_1_bytes(c.moe_ffn));
         s.pf_mf_h = s.alloc<float>((size_t)M * c.moe_ffn);
         if (c.hybrid) {
             s.pf_lin_qkv = s.alloc<bf16>((size_t)M * s.linear_qkvdim);
@@ -203,9 +204,10 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                     const int pos = base + t;
                     const int seqlen = pos + 1;
                     s.h_scalars[1] = pos;
+                    s.h_scalars[2] = pos;
                     s.h_scalars[3] = seqlen;
-                    cu(cudaMemcpyAsync(s.d_pos, &s.h_scalars[1], sizeof(int), cudaMemcpyHostToDevice, st), "pf d_pos");
-                    cu(cudaMemcpyAsync(s.d_seqlen, &s.h_scalars[3], sizeof(int), cudaMemcpyHostToDevice, st), "pf d_seqlen");
+                    cu(cudaMemcpyAsync(s.d_scalars, s.h_scalars, 4 * sizeof(int),
+                                       cudaMemcpyHostToDevice, st), "pf scalars");
 
                     bf16* q = s.pf_q + (size_t)t * s.qdim;
                     bf16* qraw = s.pf_qraw + (size_t)t * s.qdim * 2;
@@ -265,10 +267,11 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
             }
 
             kernels::launch_add_rmsnorm2(s.pf_x, s.pf_ao, w.post_attn_norm, s.pf_h, s.pf_hn, M, H, c.rms_eps, st);
+            kernels::launch_quantize_q8_1_blocks_tile(s.pf_hn, s.pf_aq81, M, H, st);
             kernels::launch_moe_expert_ffn_q4k(s.pf_hn, w.gate_q, w.up_q, w.down_q,
                 w.gate_qtype, w.up_qtype, w.down_qtype,
-                s.mf_ids, s.mf_weights, s.pf_routed, s.pf_mf_h, s.mf_out,
-                M, c.top_k, H, c.moe_ffn, nullptr, st);
+                s.mf_ids, s.mf_weights, s.pf_routed, s.pf_mf_h, s.pf_ffn_scratch,
+                M, c.top_k, H, c.moe_ffn, s.pf_aq81, st);
 
             const void* nextnorm = (L + 1 < c.n_layers) ? s.w.layers[L + 1].input_norm : s.w.final_norm;
             kernels::launch_add_rmsnorm2(s.pf_h, s.pf_routed, nextnorm, s.pf_x, s.pf_xn, M, H, c.rms_eps, st);

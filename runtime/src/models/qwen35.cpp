@@ -185,6 +185,7 @@ struct Qwen35Model::Impl {
     bf16 *pf_lin_q = nullptr, *pf_lin_k = nullptr, *pf_lin_v = nullptr, *pf_lin_gdn = nullptr, *pf_lin_norm = nullptr;
     void* pf_aq81 = nullptr;
     void* pf_aq81_q = nullptr;
+    void* pf_ffn_scratch = nullptr;
     float* pf_mf_h = nullptr;
 
     template <class T> T* alloc(size_t n) { void* p=nullptr; cu(cudaMalloc(&p, n*sizeof(T)), "malloc"); return (T*)p; }
@@ -341,7 +342,7 @@ Qwen35Model::~Qwen35Model() {
     cudaFree(p_->pf_qraw); cudaFree(p_->pf_qgate);
     cudaFree(p_->pf_lin_qkv); cudaFree(p_->pf_lin_z); cudaFree(p_->pf_lin_alpha); cudaFree(p_->pf_lin_beta);
     cudaFree(p_->pf_lin_q); cudaFree(p_->pf_lin_k); cudaFree(p_->pf_lin_v); cudaFree(p_->pf_lin_gdn); cudaFree(p_->pf_lin_norm);
-    cudaFree(p_->pf_aq81); cudaFree(p_->pf_aq81_q); cudaFree(p_->pf_mf_h);
+    cudaFree(p_->pf_aq81); cudaFree(p_->pf_aq81_q); cudaFree(p_->pf_ffn_scratch); cudaFree(p_->pf_mf_h);
     if (p_->graph_ready) { cudaGraphExecDestroy(p_->cu_exec); cudaGraphDestroy(p_->cu_graph); }
     cudaEventDestroy(p_->ev_qkv); cudaEventDestroy(p_->ev_k); cudaEventDestroy(p_->ev_v);
     cudaEventDestroy(p_->ev_pipe_fork); cudaEventDestroy(p_->ev_gdn_z); cudaEventDestroy(p_->ev_gdn_ab);
