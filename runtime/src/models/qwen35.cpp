@@ -186,8 +186,6 @@ struct Qwen35Model::Impl {
     void* pf_aq81_q = nullptr;
     float* pf_mf_h = nullptr;
 
-    friend bool qwen35_batched_prefill_impl(Impl& s, const std::vector<int>& tokens);
-
     template <class T> T* alloc(size_t n) { void* p=nullptr; cu(cudaMalloc(&p, n*sizeof(T)), "malloc"); return (T*)p; }
 };
 
@@ -1634,7 +1632,7 @@ bool Qwen35Model::load_gguf(const std::string& path) {
 #include "qwen35_batched_prefill.inl"
 
 bool Qwen35Model::prefill_batched(const std::vector<int>& tokens) {
-    return qwen35_batched_prefill_impl(*p_, tokens);
+    return prefill_batched_impl(tokens);
 }
 
 } // namespace sparkinfer

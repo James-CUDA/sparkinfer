@@ -110,6 +110,8 @@ public:
     const Qwen35Config& config() const;
 
 private:
+    bool prefill_batched_impl(const std::vector<int>& tokens);
+
     struct Impl;
     Impl* p_;
 };

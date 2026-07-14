@@ -22,51 +22,12 @@ static bool prefill_debug() {
     return on != 0;
 }
 
-static void ensure_pf_bufs(Qwen35Model::Impl& s, int M) {
-    if (M <= s.pf_tile_cap) return;
-    const Qwen35Config& c = s.cfg;
-    const int H = c.hidden;
-    auto freep = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
-    freep(s.pf_toks); freep(s.pf_pos);
-    freep(s.pf_x); freep(s.pf_xn); freep(s.pf_ao); freep(s.pf_h); freep(s.pf_hn);
-    freep(s.pf_routed); freep(s.pf_q); freep(s.pf_k); freep(s.pf_v); freep(s.pf_attn);
-    freep(s.pf_lin_qkv); freep(s.pf_lin_z); freep(s.pf_lin_alpha); freep(s.pf_lin_beta);
-    freep(s.pf_lin_q); freep(s.pf_lin_k); freep(s.pf_lin_v); freep(s.pf_lin_gdn); freep(s.pf_lin_norm);
-    freep(s.pf_aq81); freep(s.pf_aq81_q); freep(s.pf_mf_h);
-    s.pf_tile_cap = M;
-    s.pf_toks = s.alloc<int>(M);
-    s.pf_pos = s.alloc<int>(M);
-    s.pf_x = s.alloc<bf16>((size_t)M * H);
-    s.pf_xn = s.alloc<bf16>((size_t)M * H);
-    s.pf_ao = s.alloc<bf16>((size_t)M * H);
-    s.pf_h = s.alloc<bf16>((size_t)M * H);
-    s.pf_hn = s.alloc<bf16>((size_t)M * H);
-    s.pf_routed = s.alloc<bf16>((size_t)M * H);
-    s.pf_q = s.alloc<bf16>((size_t)M * s.qdim);
-    s.pf_k = s.alloc<bf16>((size_t)M * s.kvdim);
-    s.pf_v = s.alloc<bf16>((size_t)M * s.kvdim);
-    s.pf_attn = s.alloc<bf16>((size_t)M * s.qdim);
-    s.pf_aq81 = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(H));
-    s.pf_aq81_q = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(s.qdim));
-    s.pf_mf_h = s.alloc<float>((size_t)M * c.moe_ffn);
-    if (c.hybrid) {
-        s.pf_lin_qkv = s.alloc<bf16>((size_t)M * s.linear_qkvdim);
-        s.pf_lin_z = s.alloc<bf16>((size_t)M * s.linear_vdim);
-        s.pf_lin_alpha = s.alloc<bf16>((size_t)M * c.linear_v_heads);
-        s.pf_lin_beta = s.alloc<bf16>((size_t)M * c.linear_v_heads);
-        s.pf_lin_q = s.alloc<bf16>((size_t)M * s.linear_qdim);
-        s.pf_lin_k = s.alloc<bf16>((size_t)M * s.linear_qdim);
-        s.pf_lin_v = s.alloc<bf16>((size_t)M * s.linear_vdim);
-        s.pf_lin_gdn = s.alloc<bf16>((size_t)M * s.linear_vdim);
-        s.pf_lin_norm = s.alloc<bf16>((size_t)M * s.linear_vdim);
-    }
-}
-
 static bool pf_q4k_type(int t) { return t == 12; }
 
 } // namespace
 
-bool qwen35_batched_prefill_impl(Qwen35Model::Impl& s, const std::vector<int>& tokens) {
+bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
+    Impl& s = *p_;
     if (tokens.empty()) return false;
     const Qwen35Config& c = s.cfg;
     const int H = c.hidden;
@@ -80,7 +41,45 @@ bool qwen35_batched_prefill_impl(Qwen35Model::Impl& s, const std::vector<int>& t
 
     const int TILE = prefill_tile_rows();
     if (TILE <= 1) return false;
-    ensure_pf_bufs(s, TILE);
+
+    auto ensure_bufs = [&](int M) {
+        if (M <= s.pf_tile_cap) return;
+        auto freep = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+        freep(s.pf_toks); freep(s.pf_pos);
+        freep(s.pf_x); freep(s.pf_xn); freep(s.pf_ao); freep(s.pf_h); freep(s.pf_hn);
+        freep(s.pf_routed); freep(s.pf_q); freep(s.pf_k); freep(s.pf_v); freep(s.pf_attn);
+        freep(s.pf_lin_qkv); freep(s.pf_lin_z); freep(s.pf_lin_alpha); freep(s.pf_lin_beta);
+        freep(s.pf_lin_q); freep(s.pf_lin_k); freep(s.pf_lin_v); freep(s.pf_lin_gdn); freep(s.pf_lin_norm);
+        freep(s.pf_aq81); freep(s.pf_aq81_q); freep(s.pf_mf_h);
+        s.pf_tile_cap = M;
+        s.pf_toks = s.alloc<int>(M);
+        s.pf_pos = s.alloc<int>(M);
+        s.pf_x = s.alloc<bf16>((size_t)M * H);
+        s.pf_xn = s.alloc<bf16>((size_t)M * H);
+        s.pf_ao = s.alloc<bf16>((size_t)M * H);
+        s.pf_h = s.alloc<bf16>((size_t)M * H);
+        s.pf_hn = s.alloc<bf16>((size_t)M * H);
+        s.pf_routed = s.alloc<bf16>((size_t)M * H);
+        s.pf_q = s.alloc<bf16>((size_t)M * s.qdim);
+        s.pf_k = s.alloc<bf16>((size_t)M * s.kvdim);
+        s.pf_v = s.alloc<bf16>((size_t)M * s.kvdim);
+        s.pf_attn = s.alloc<bf16>((size_t)M * s.qdim);
+        s.pf_aq81 = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(H));
+        s.pf_aq81_q = s.alloc<char>((size_t)M * kernels::llama_q8_1_bytes(s.qdim));
+        s.pf_mf_h = s.alloc<float>((size_t)M * c.moe_ffn);
+        if (c.hybrid) {
+            s.pf_lin_qkv = s.alloc<bf16>((size_t)M * s.linear_qkvdim);
+            s.pf_lin_z = s.alloc<bf16>((size_t)M * s.linear_vdim);
+            s.pf_lin_alpha = s.alloc<bf16>((size_t)M * c.linear_v_heads);
+            s.pf_lin_beta = s.alloc<bf16>((size_t)M * c.linear_v_heads);
+            s.pf_lin_q = s.alloc<bf16>((size_t)M * s.linear_qdim);
+            s.pf_lin_k = s.alloc<bf16>((size_t)M * s.linear_qdim);
+            s.pf_lin_v = s.alloc<bf16>((size_t)M * s.linear_vdim);
+            s.pf_lin_gdn = s.alloc<bf16>((size_t)M * s.linear_vdim);
+            s.pf_lin_norm = s.alloc<bf16>((size_t)M * s.linear_vdim);
+        }
+    };
+    ensure_bufs(TILE);
     cudaStream_t st = s.stream;
     int* btable = s.kv->block_table(s.seq_id);
     const int n = (int)tokens.size();
