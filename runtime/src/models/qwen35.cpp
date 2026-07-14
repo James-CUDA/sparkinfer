@@ -177,6 +177,7 @@ struct Qwen35Model::Impl {
     int pf_tile_cap = 0;
     int* pf_toks = nullptr;
     int* pf_pos = nullptr;
+    int* pf_seqlen = nullptr;
     bf16 *pf_x = nullptr, *pf_xn = nullptr, *pf_ao = nullptr, *pf_h = nullptr, *pf_hn = nullptr;
     bf16 *pf_routed = nullptr;
     bf16 *pf_q = nullptr, *pf_k = nullptr, *pf_v = nullptr, *pf_attn = nullptr;
@@ -339,7 +340,7 @@ Qwen35Model::~Qwen35Model() {
     cudaFree(p_->fa_m); cudaFree(p_->fa_l); cudaFree(p_->fa_acc);
     cudaFree(p_->sparse_sel);
     cudaFree(p_->aq8); cudaFree(p_->aq8_d); cudaFree(p_->aq8_s); cudaFree(p_->aq81);
-    cudaFree(p_->pf_toks); cudaFree(p_->pf_pos);
+    cudaFree(p_->pf_toks); cudaFree(p_->pf_pos); cudaFree(p_->pf_seqlen);
     cudaFree(p_->pf_x); cudaFree(p_->pf_xn); cudaFree(p_->pf_ao); cudaFree(p_->pf_h); cudaFree(p_->pf_hn);
     cudaFree(p_->pf_routed); cudaFree(p_->pf_q); cudaFree(p_->pf_k); cudaFree(p_->pf_v); cudaFree(p_->pf_attn);
     cudaFree(p_->pf_qraw); cudaFree(p_->pf_qgate);
@@ -1071,6 +1072,8 @@ int Qwen35Model::forward_token(int token_id, int position) {
 
     cu(cudaMemcpyAsync(s.h_out_id, s.d_out_id, sizeof(int), cudaMemcpyDeviceToHost, st), "out_id");
     cu(cudaStreamSynchronize(st), "sync");
+    if (s.stream_k) cu(cudaStreamSynchronize(s.stream_k), "sync k");
+    if (s.stream_v) cu(cudaStreamSynchronize(s.stream_v), "sync v");
     return *s.h_out_id;
 }
 

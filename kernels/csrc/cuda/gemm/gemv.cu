@@ -845,6 +845,7 @@ __global__ void si_mmvq_q4k_tile_kernel(const si_block_q8_1* __restrict__ vy,
     const si_block_q4_K* w_row = (const si_block_q4_K*)(W + (size_t)row * NSUPER * 144);
     constexpr int blocks_per_iter = vdr * NW * WS / qi;
     constexpr int act_blocks = NSUPER * 8;   // NSUPER Q4_K tiles span NSUPER*8 Q8_1 blocks (256 K each)
+    __shared__ float tmp_shared[NW - 1][WS];
     for (int m = 0; m < M; ++m) {
         const si_block_q8_1* vy_m = vy + (size_t)m * act_blocks;
         float tmp = 0.0f;
@@ -854,7 +855,6 @@ __global__ void si_mmvq_q4k_tile_kernel(const si_block_q8_1* __restrict__ vy,
             const int kqs = vdr * (tid % (qi / vdr));
             tmp += si_vec_dot_q4_K(w_row + kbx, vy_m + kby, kqs);
         }
-        __shared__ float tmp_shared[NW - 1][WS];
         if (warp > 0) tmp_shared[warp - 1][lane] = tmp;
         __syncthreads();
         if (warp == 0) {
@@ -895,6 +895,7 @@ __global__ void si_attn_qkv_mmvq_q4k_tile_kernel(
     const si_block_q4_K* w_row = (const si_block_q4_K*)(W + (size_t)lrow * NSUPER * 144);
     constexpr int blocks_per_iter = vdr * NW * WS / qi;
     constexpr int act_blocks = NSUPER * 8;   // NSUPER Q4_K tiles span NSUPER*8 Q8_1 blocks (256 K each)
+    __shared__ float tmp_shared[NW - 1][WS];
     for (int m = 0; m < M; ++m) {
         const si_block_q8_1* vy_m = vy + (size_t)m * act_blocks;
         float tmp = 0.0f;
@@ -904,7 +905,6 @@ __global__ void si_attn_qkv_mmvq_q4k_tile_kernel(
             const int kqs = vdr * (tid % (qi / vdr));
             tmp += si_vec_dot_q4_K(w_row + kbx, vy_m + kby, kqs);
         }
-        __shared__ float tmp_shared[NW - 1][WS];
         if (warp > 0) tmp_shared[warp - 1][lane] = tmp;
         __syncthreads();
         if (warp == 0) {

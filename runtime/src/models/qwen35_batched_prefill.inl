@@ -65,7 +65,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
     auto ensure_bufs = [&](int M) {
         if (M <= s.pf_tile_cap) return;
         auto freep = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
-        freep(s.pf_toks); freep(s.pf_pos);
+        freep(s.pf_toks); freep(s.pf_pos); freep(s.pf_seqlen);
         freep(s.pf_x); freep(s.pf_xn); freep(s.pf_ao); freep(s.pf_h); freep(s.pf_hn);
         freep(s.pf_routed); freep(s.pf_q); freep(s.pf_k); freep(s.pf_v); freep(s.pf_attn);
         freep(s.pf_qraw); freep(s.pf_qgate);
@@ -76,6 +76,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         s.pf_tile_cap = M;
         s.pf_toks = s.alloc<int>(M);
         s.pf_pos = s.alloc<int>(M);
+        s.pf_seqlen = s.alloc<int>(M);
         s.pf_x = s.alloc<bf16>((size_t)M * H);
         s.pf_xn = s.alloc<bf16>((size_t)M * H);
         s.pf_ao = s.alloc<bf16>((size_t)M * H);
@@ -159,12 +160,17 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
 
     for (int base = 0; base < n; base += TILE) {
         const int M = (n - base < TILE) ? (n - base) : TILE;
-        std::vector<int> hpos((size_t)M);
-        for (int t = 0; t < M; ++t) hpos[(size_t)t] = base + t;
+        std::vector<int> hpos((size_t)M), hseq((size_t)M);
+        for (int t = 0; t < M; ++t) {
+            hpos[(size_t)t] = base + t;
+            hseq[(size_t)t] = base + t + 1;
+        }
         cu(cudaMemcpyAsync(s.pf_toks, tokens.data() + base, (size_t)M * sizeof(int),
                            cudaMemcpyHostToDevice, st), "pf toks");
         cu(cudaMemcpyAsync(s.pf_pos, hpos.data(), (size_t)M * sizeof(int),
                            cudaMemcpyHostToDevice, st), "pf pos");
+        cu(cudaMemcpyAsync(s.pf_seqlen, hseq.data(), (size_t)M * sizeof(int),
+                           cudaMemcpyHostToDevice, st), "pf seqlen");
 
         kernels::launch_embedding(s.pf_toks, s.w.embed_tokens, s.pf_x, M, H, st);
         kernels::launch_rmsnorm(s.pf_x, s.w.layers[0].input_norm, s.pf_xn, M, H, c.rms_eps, st);
@@ -183,6 +189,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                 } else {
                     pf_fail("gdn qtypes"); return false;
                 }
+                cu(cudaStreamSynchronize(st), "pf gdn tile sync");
 
                 for (int t = 0; t < M; ++t) {
                     const int pos = base + t;
@@ -229,6 +236,7 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                 kernels::launch_quantize_q8_1_blocks_tile(s.pf_xn, s.pf_aq81, M, H, st);
                 kernels::launch_attn_qkv_mmvq_q4k_tile(s.pf_aq81, w.wq, w.wk, w.wv,
                     yq, s.pf_k, s.pf_v, M, nq, s.kvdim, s.kvdim, H, st);
+                cu(cudaStreamSynchronize(st), "pf qkv tile sync");
 
                 void* kpool = (char*)s.kv->k_pool() + (size_t)L * s.kv->layer_stride_elems() * kv_elem;
                 void* vpool = (char*)s.kv->v_pool() + (size_t)L * s.kv->layer_stride_elems() * kv_elem;
@@ -240,11 +248,8 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                 for (int t = 0; t < M; ++t) {
                     const int pos = base + t;
                     const int seqlen = pos + 1;
-                    s.h_scalars[1] = pos;
-                    s.h_scalars[2] = pos;
-                    s.h_scalars[3] = seqlen;
-                    cu(cudaMemcpyAsync(s.d_scalars, s.h_scalars, 4 * sizeof(int),
-                                       cudaMemcpyHostToDevice, st), "pf scalars");
+                    const int* d_pos = s.pf_pos + t;
+                    const int* d_sl = s.pf_seqlen + t;
                     pf_update_splits(seqlen);
 
                     bf16* q = s.pf_q + (size_t)t * s.qdim;
@@ -264,12 +269,12 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                         if (s.use_qkfuse && H == 2048) {
                             if (qkgate_fuse) {
                                 kernels::launch_qknorm_rope_kv_partial_int8_gated(qraw, q, qgate, k, v,
-                                    w.q_norm, w.k_norm, kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
+                                    w.q_norm, w.k_norm, kpool, vpool, kscale, vscale, btable, d_pos, 1,
                                     c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
                                     s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
                             } else {
                                 kernels::launch_qknorm_rope_kv_partial_int8(q, k, v, w.q_norm, w.k_norm,
-                                    kpool, vpool, kscale, vscale, btable, s.d_pos, 1,
+                                    kpool, vpool, kscale, vscale, btable, d_pos, 1,
                                     c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim, c.rope_theta, c.rms_eps,
                                     s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
                             }
@@ -282,13 +287,13 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                                 kernels::launch_rmsnorm(k, w.k_norm, k, c.n_kv_heads, c.head_dim, c.rms_eps, st);
                             }
                             kernels::launch_rope_kv_append_partial_int8(q, k, v, kpool, vpool, kscale, vscale,
-                                btable, s.d_pos, 1, c.n_q_heads, c.n_kv_heads,
+                                btable, d_pos, 1, c.n_q_heads, c.n_kv_heads,
                                 c.head_dim, c.rope_dim, c.rope_theta,
                                 s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
                         }
                     } else if (partial_rope && s.use_qkfuse) {
                         kernels::launch_qknorm_rope_kv_partial(q, k, v, w.q_norm, w.k_norm,
-                            (bf16*)kpool, (bf16*)vpool, btable, s.d_pos, 1,
+                            (bf16*)kpool, (bf16*)vpool, btable, d_pos, 1,
                             c.n_q_heads, c.n_kv_heads, c.head_dim, c.rope_dim,
                             c.rope_theta, c.rms_eps, s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
                     } else {
@@ -304,16 +309,16 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
                            "pf fa_acc zero");
                     }
                     if (sparse_on && kv8) {
-                        kernels::launch_fa_kv_window_select(s.d_seqlen, s.sparse_sel, c.n_kv_heads,
+                        kernels::launch_fa_kv_window_select(d_sl, s.sparse_sel, c.n_kv_heads,
                             s.kv->block_size(), s.sparse_budget, s.sparse_window, st);
-                        kernels::launch_flash_decode_split_sparse(q, kpool, vpool, btable, s.d_seqlen,
+                        kernels::launch_flash_decode_split_sparse(q, kpool, vpool, btable, d_sl,
                             s.sparse_sel, s.fa_m, s.fa_l, s.fa_acc, c.n_q_heads, c.n_kv_heads, c.head_dim,
                             s.kv->block_size(), s.kv->max_blocks_per_seq(), s.n_splits, s.sparse_budget,
                             1.f / sqrtf((float)c.head_dim), kscale, vscale, st);
                         kernels::launch_fa_combine_hd256(s.fa_m, s.fa_l, s.fa_acc, attn, c.n_q_heads,
                             s.n_splits, attn_q8, st);
                     } else {
-                        kernels::launch_flash_decode_split(q, kpool, vpool, btable, s.d_seqlen, attn,
+                        kernels::launch_flash_decode_split(q, kpool, vpool, btable, d_sl, attn,
                             s.fa_m, s.fa_l, s.fa_acc, 1, c.n_q_heads, c.n_kv_heads, c.head_dim,
                             s.kv->block_size(), s.kv->max_blocks_per_seq(), s.n_splits,
                             1.f / sqrtf((float)c.head_dim), st, attn_q8, seqlen,
