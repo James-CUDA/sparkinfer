@@ -463,16 +463,17 @@ int Qwen35Model::forward_token(int token_id, int position) {
            "linear conv reset");
     }
 
-    // Capture the decode compute into a CUDA graph on the first token, then
-    // replay it every token (per-token inputs live in the d_tok/pos/seqlen/
-    // writepos device buffers uploaded above, so replay produces fresh results).
+    // Capture the decode compute into a CUDA graph on the first token at position 0,
+    // then replay it every token. After batched prefill the first forward_token runs
+    // at position>0 with KV already filled — skip capture there (eager decode).
     if (s.graph_ready) {
         cu(cudaGraphLaunch(s.cu_exec, st), "graph launch");
         cu(cudaMemcpyAsync(s.h_out_id, s.d_out_id, sizeof(int), cudaMemcpyDeviceToHost, st), "out_id");
         cu(cudaStreamSynchronize(st), "sync");
         return *s.h_out_id;
     }
-    cu(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "begin capture");
+    const bool do_capture = (position == 0);
+    if (do_capture) cu(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "begin capture");
 
     kernels::launch_embedding(s.d_tok, s.w.embed_tokens, s.x, 1, H, st);
 
@@ -1032,22 +1033,24 @@ int Qwen35Model::forward_token(int token_id, int position) {
     kernels::launch_argmax(s.logits, s.d_out_id, 1, c.vocab, st);
     if (s.bench_feedback_graph) kernels::launch_decode_feedback(s.d_scalars, s.d_out_id, st);
 
-    cu(cudaStreamEndCapture(st, &s.cu_graph), "end capture");
-    cu(cudaGraphInstantiate(&s.cu_exec, s.cu_graph, 0), "graph instantiate");
-    s.graph_ready = true;
-    s.graph_attn_mode = attn_graph_mode;
-    s.graph_sparse = sparse_on;
-    static int graph_dbg = -1;
-    if (graph_dbg < 0) {
-        const char* e = getenv("SPARKINFER_GRAPH_DEBUG");
-        graph_dbg = (e && e[0] == '1') ? 1 : 0;
+    if (do_capture) {
+        cu(cudaStreamEndCapture(st, &s.cu_graph), "end capture");
+        cu(cudaGraphInstantiate(&s.cu_exec, s.cu_graph, 0), "graph instantiate");
+        s.graph_ready = true;
+        s.graph_attn_mode = attn_graph_mode;
+        s.graph_sparse = sparse_on;
+        static int graph_dbg = -1;
+        if (graph_dbg < 0) {
+            const char* e = getenv("SPARKINFER_GRAPH_DEBUG");
+            graph_dbg = (e && e[0] == '1') ? 1 : 0;
+        }
+        if (graph_dbg) {
+            const int mma_chunk = (s.n_splits > 0) ? (seqlen + s.n_splits - 1) / s.n_splits : 0;
+            fprintf(stderr, "[graph] capture pos=%d seqlen=%d n_splits=%d attn_mode=%d mma_chunk=%d sparse=%d\n",
+                    position, seqlen, s.n_splits, attn_graph_mode, mma_chunk, sparse_on ? 1 : 0);
+        }
+        cu(cudaGraphLaunch(s.cu_exec, st), "graph launch (first)");
     }
-    if (graph_dbg) {
-        const int mma_chunk = (s.n_splits > 0) ? (seqlen + s.n_splits - 1) / s.n_splits : 0;
-        fprintf(stderr, "[graph] capture pos=%d seqlen=%d n_splits=%d attn_mode=%d mma_chunk=%d sparse=%d\n",
-                position, seqlen, s.n_splits, attn_graph_mode, mma_chunk, sparse_on ? 1 : 0);
-    }
-    cu(cudaGraphLaunch(s.cu_exec, st), "graph launch (first)");
 
     cu(cudaMemcpyAsync(s.h_out_id, s.d_out_id, sizeof(int), cudaMemcpyDeviceToHost, st), "out_id");
     cu(cudaStreamSynchronize(st), "sync");
