@@ -65,7 +65,7 @@ The default eval target is now multi-context decode:
 - If no single context clears the 2% significance gate and any context regresses, the bot returns `eval:REJECT` and auto-closes the PR.
 - Difficulty compensation uses the selected context's llama.cpp baseline, so late-game improvements past the mature reference get the same multiplier logic at every context.
 
-32k is intentionally sampled once by default (`SPARKINFER_GUARD_32K_REPS=1`) to keep the eval cost bounded while still making long-context regressions and wins visible.
+Each context is sampled once by default (`SPARKINFER_GUARD_*_REPS=1`, `SPARKINFER_SCORE_REPS=1`) to keep eval cost bounded.
 
 Set `SPARKINFER_EVAL_MODE=short` or pass `--eval-mode short` to keep the legacy 128-token scoring path.
 

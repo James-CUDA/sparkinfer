@@ -5,7 +5,7 @@
 #
 #   bench/scripts/evaluate.sh [--ref GIT_REF] [--frontier TPS] [--ceiling TPS] [--gguf PATH]
 #
-# correctness = token-match / KL vs llama.cpp (accuracy.sh) · speed = median of 3 bench runs
+# correctness = token-match / KL vs llama.cpp (accuracy.sh) · speed = single bench run per context
 # · label = significance gate + headroom bucket (label.py). Source-built (NO_PREBUILT) so the
 # measured artifact is the submitted code.
 set -euo pipefail
@@ -69,7 +69,7 @@ GUARD_32K_CTX="${SPARKINFER_GUARD_32K_CTX:-32768}"
 GUARD_64K_CTX="${SPARKINFER_GUARD_64K_CTX:-65536}"
 GUARD_128K_CTX="${SPARKINFER_GUARD_128K_CTX:-131072}"
 DECODE_TOKENS="${SPARKINFER_DECODE_TOKENS:-128}"
-SCORE_REPS="${SPARKINFER_SCORE_REPS:-3}"
+SCORE_REPS="${SPARKINFER_SCORE_REPS:-1}"
 GUARD_REPS="${SPARKINFER_GUARD_REPS:-1}"
 GUARD_512_REPS="${SPARKINFER_GUARD_512_REPS:-1}"
 GUARD_4K_REPS="${SPARKINFER_GUARD_4K_REPS:-1}"
@@ -124,7 +124,7 @@ gclks=()
 
 if [ "$EVAL_MODE" = "short" ]; then
   si_run qwen3_gguf_bench "$GGUF" 192 0 >/dev/null 2>&1 || true
-  TPS="$(median_ctx 0 3)"
+  TPS="$(median_ctx 0 1)"
   GUARD_TPS=0; GUARD_512_TPS=0; GUARD_4K_TPS=0; GUARD_32K_TPS=0; GUARD_64K_TPS=0; GUARD_128K_TPS=0
   GUARD_PASS=true; GUARD_512_PASS=true; GUARD_4K_PASS=true; GUARD_16K_PASS=true; ALL_GUARDS_PASS=true
   GUARD_RATIO=0; GUARD_512_RATIO=0; GUARD_4K_RATIO=0; GUARD_16K_RATIO=0
