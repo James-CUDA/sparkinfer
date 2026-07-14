@@ -143,11 +143,6 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
         const char* e = getenv("SPARKINFER_GDN_GNORM_Q8");
         gdn_gn_q8_pf = (e && e[0] == '0') ? 0 : 1;
     }
-    static int gdn_fuse_pf = -1;
-    if (gdn_fuse_pf < 0) {
-        const char* e = getenv("SPARKINFER_GDN_QKVZ_FUSE");
-        gdn_fuse_pf = (e && e[0] == '0') ? 0 : 1;
-    }
     auto pf_update_splits = [&](int seqlen) {
         if (!s.adaptive_splits) return;
         int want = 32;
@@ -183,28 +178,8 @@ bool Qwen35Model::prefill_batched_impl(const std::vector<int>& tokens) {
 
             if (w.linear_attn) {
                 kernels::launch_quantize_q8_1_blocks_tile(s.pf_xn, s.pf_aq81, M, H, st);
-                const bool gdn_fused_proj = gdn_fuse_pf && s.gguf && s.use_pq && s.use_llama &&
-                    pf_q4k_type(w.wqkv_type) && pf_q4k_type(w.wqkv_gate_type) &&
-                    (H == 2048 || H == 4096) && s.linear_qkvdim > 0 && s.linear_vdim > 0;
-                if (gdn_fused_proj) {
-                    for (int t = 0; t < M; ++t) {
-                        const void* aq = (char*)s.pf_aq81 +
-                            (size_t)t * kernels::llama_q8_1_bytes(H);
-                        kernels::launch_mmvq_gdn_qkv_z_pack2(aq, w.wqkv, w.wqkv_gate,
-                            s.pf_lin_qkv + (size_t)t * s.linear_qkvdim,
-                            s.pf_lin_z + (size_t)t * s.linear_vdim,
-                            s.linear_qkvdim, s.linear_vdim, H, st);
-                        if (!pf_q4k_type(w.ssm_alpha_type) || !pf_q4k_type(w.ssm_beta_type))
-                            return false;
-                        kernels::launch_mmvq_q4k(aq, w.ssm_alpha,
-                            s.pf_lin_alpha + (size_t)t * c.linear_v_heads,
-                            c.linear_v_heads, H, st);
-                        kernels::launch_mmvq_q4k(aq, w.ssm_beta,
-                            s.pf_lin_beta + (size_t)t * c.linear_v_heads,
-                            c.linear_v_heads, H, st);
-                    }
-                } else if (pf_q4k_type(w.wqkv_type) && pf_q4k_type(w.wqkv_gate_type) &&
-                           pf_q4k_type(w.ssm_alpha_type) && pf_q4k_type(w.ssm_beta_type)) {
+                if (pf_q4k_type(w.wqkv_type) && pf_q4k_type(w.wqkv_gate_type) &&
+                    pf_q4k_type(w.ssm_alpha_type) && pf_q4k_type(w.ssm_beta_type)) {
                     kernels::launch_mmvq_q4k_tile(s.pf_aq81, w.wqkv, s.pf_lin_qkv, M, s.linear_qkvdim, H, st);
                     kernels::launch_mmvq_q4k_tile(s.pf_aq81, w.wqkv_gate, s.pf_lin_z, M, s.linear_vdim, H, st);
                     kernels::launch_mmvq_q4k_tile(s.pf_aq81, w.ssm_alpha, s.pf_lin_alpha, M, c.linear_v_heads, H, st);

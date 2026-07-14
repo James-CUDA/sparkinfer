@@ -844,8 +844,9 @@ __global__ void si_mmvq_q4k_tile_kernel(const si_block_q8_1* __restrict__ vy,
     if (row >= N) return;
     const si_block_q4_K* w_row = (const si_block_q4_K*)(W + (size_t)row * NSUPER * 144);
     constexpr int blocks_per_iter = vdr * NW * WS / qi;
+    constexpr int act_blocks = NSUPER * 8;   // NSUPER Q4_K tiles span NSUPER*8 Q8_1 blocks (256 K each)
     for (int m = 0; m < M; ++m) {
-        const si_block_q8_1* vy_m = vy + (size_t)m * NSUPER;
+        const si_block_q8_1* vy_m = vy + (size_t)m * act_blocks;
         float tmp = 0.0f;
         #pragma unroll
         for (int kbx = tid / (qi / vdr); kbx < NSUPER; kbx += blocks_per_iter) {
@@ -893,8 +894,9 @@ __global__ void si_attn_qkv_mmvq_q4k_tile_kernel(
     else                { W = Wv; y = yv; lrow = row - nk; outN = Nv; }
     const si_block_q4_K* w_row = (const si_block_q4_K*)(W + (size_t)lrow * NSUPER * 144);
     constexpr int blocks_per_iter = vdr * NW * WS / qi;
+    constexpr int act_blocks = NSUPER * 8;   // NSUPER Q4_K tiles span NSUPER*8 Q8_1 blocks (256 K each)
     for (int m = 0; m < M; ++m) {
-        const si_block_q8_1* vy_m = vy + (size_t)m * NSUPER;
+        const si_block_q8_1* vy_m = vy + (size_t)m * act_blocks;
         float tmp = 0.0f;
         #pragma unroll
         for (int kbx = tid / (qi / vdr); kbx < NSUPER; kbx += blocks_per_iter) {
