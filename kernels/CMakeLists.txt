@@ -28,6 +28,13 @@ add_subdirectory(csrc/cuda/fused)       # fused GEMM + epilogue (non-CuTe path)
 
 set(SPARKINFER_KERNEL_LIBS si_attn si_gemm si_moe si_quant si_fused)
 
+if(MSVC)
+  # MSVC device link of RDC static libs into a DLL is brittle; whole-TU compile is fine.
+  foreach(lib IN LISTS SPARKINFER_KERNEL_LIBS)
+    set_target_properties(${lib} PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+  endforeach()
+endif()
+
 # --- Optional CuTe DSL kernel domains (experimental, sm_100a/sm_120a) ---
 if(BUILD_CUTE_KERNELS)
     include(FetchContent)
