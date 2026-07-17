@@ -1116,8 +1116,11 @@ bool batched_prefill_enabled(bool gguf, const Qwen35Config& cfg, int n_tokens) {
         const char* mc = getenv("SPARKINFER_PREFILL_BATCHED_MAXCTX");
         batched_maxctx = mc ? atoi(mc) : 65536;
     }
-    return want_batched && gguf && cfg.hybrid && cfg.dense_ffn && n_tokens > 0 &&
-           n_tokens <= batched_maxctx;
+    // dense hybrid (Qwythos) or the Qwen3.6 256-expert MoE hybrid — prefill_batched_run
+    // validates the MoE requirements itself and returns -1 to fall back if unsupported.
+    return want_batched && gguf && cfg.hybrid &&
+           (cfg.dense_ffn || (cfg.n_experts == 256 && cfg.top_k > 0)) &&
+           n_tokens > 0 && n_tokens <= batched_maxctx;
 }
 } // namespace
 
