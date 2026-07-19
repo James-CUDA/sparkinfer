@@ -133,14 +133,17 @@ def _apply_bidir_ctx_from_bres(bres, q36, q35):
         return True
 
     def _fill_pp(score, store, keys, mapping):
+        """Fill whichever prefill contexts measured >0. Qwen3.6 often has 128_pp=0; requiring
+        every key used to abort the whole fill and leave all baselines at 0 (PR #403)."""
         if not score:
             return False
+        got = False
         for k in keys:
             v = float(score.get(mapping[k]) or 0)
-            if v <= 0:
-                return False
-            store[k] = v
-        return True
+            if v > 0:
+                store[k] = v
+                got = True
+        return got
 
     got36 = _fill(bres.get("score_qwen36"), q36, ("128", "512", "4k", "16k", "32k"))
     got35 = _fill(bres.get("score_qwen35"), q35, ("128", "4k", "32k", "64k"))
@@ -179,6 +182,16 @@ def _origin_main_short():
     return (r.stdout or "").strip() or None
 
 
+def _bench_harness_changed_between(old_commit, new_commit):
+    """True when bench/scripts differs between two main commits (needs fresh baseline)."""
+    if not old_commit or not new_commit or old_commit == new_commit:
+        return False
+    r = subprocess.run(
+        ["git", "-C", ROOT, "diff", "--quiet", f"{old_commit}..{new_commit}", "--", "bench/scripts"],
+        capture_output=True, text=True)
+    return r.returncode != 0
+
+
 def _baseline_cache_valid(cache, bidir, q36, q35, main_commit=None):
     """Return True when a loaded baseline cache entry is safe to reuse."""
     if not cache:
@@ -186,7 +199,8 @@ def _baseline_cache_valid(cache, bidir, q36, q35, main_commit=None):
     bres = cache.get("bres") or {}
     cached_commit = bres.get("commit")
     if main_commit and cached_commit and cached_commit != main_commit:
-        return False
+        if _bench_harness_changed_between(cached_commit, main_commit):
+            return False
     if bidir:
         probe36, probe35 = dict(q36), dict(q35)
         return (_apply_bidir_ctx_from_bres(bres, probe36, probe35)
@@ -215,7 +229,10 @@ def _load_baseline_cache(box_id, max_age_hours=12):
 def _parse_only_prs(only_pr, only_prs):
     out = set()
     if only_pr:
-        out.add(int(only_pr))
+        for part in str(only_pr).split(","):
+            part = part.strip()
+            if part:
+                out.add(int(part))
     for part in (only_prs or "").split(","):
         part = part.strip()
         if part:
@@ -251,6 +268,7 @@ DRAFT_STALE_DAYS   = int(os.environ.get("SPARKINFER_DRAFT_STALE_DAYS", "4"))
 STALE_CLOSE_SKIP_LABELS = {HOLD_LABEL, MERGE_FIRST_LABEL}  # protected from auto-close
 EXHAUSTED_EVAL_MAX = int(os.environ.get("SPARKINFER_EXHAUSTED_EVAL_MAX", "2"))
 FAIL_VERDICT_LABELS = frozenset({"none", "REJECT"})
+INFRA_LABEL = "infra-error"
 CONTEXT_LABELS     = {"128-context", "512-context", "4k-context", "16k-context", "32k-context",
                       "64k-context", "128k-context"}
 REGRESSION_LABELS  = {"regression-128", "regression-512", "regression-4k", "regression-16k",
@@ -577,6 +595,13 @@ def _eval_verdict_from_comment(body):
         return None
     m = re.search(r"\|\s*\*\*label\*\*\s*\|\s*`eval:([^`]+)`", body)
     return m.group(1) if m else None
+
+
+def _public_eval_label(res):
+    """GitHub label tier for a verdict — infra failures are not scored REJECTs."""
+    if res and res.get("infra_error"):
+        return INFRA_LABEL
+    return res.get("label") if res else None
 
 
 def none_reject_eval_count(repo, num):
@@ -1008,7 +1033,11 @@ def _best_prefill_measurement(block):
 
 def render(res, oid):
     label = res.get("label", "?")
-    icon = {"REJECT": "❌", "none": "⚪", "BASELINE": "📊"}.get(label, "✅")
+    display_label = _public_eval_label(res) or label
+    if res.get("infra_error"):
+        icon = "⚠️"
+    else:
+        icon = {"REJECT": "❌", "none": "⚪", "BASELINE": "📊"}.get(label, "✅")
     # A passing speedup (XL/L/M/S/XS) clears the significance gate, so its tps becomes the NEW frontier.
     advanced = label in {"XL", "L", "M", "S", "XS"} and res.get("pass")
     ctx_label = res.get("best_context_label")
@@ -1026,14 +1055,20 @@ def render(res, oid):
     if not short and scored_model:
         short = scored_model.split("-")[0]
     gname = res.get("guard_model", "Qwen3-30B")
-    rows = [f"| **label** | `eval:{label}` |"]
+    rows = [f"| **label** | `eval:{display_label}` |"]
     if bidir:
-        rows.append(f"| Qwen3.5 score | `eval-qwen35:{res.get('label_qwen35', '?')}` "
-                    f"({'pass' if res.get('pass_qwen35') else 'fail'}) |")
-        rows.append(f"| Qwen3.6 score | `eval-qwen36:{res.get('label_qwen36', '?')}` "
-                    f"({'pass' if res.get('pass_qwen36') else 'fail'}) |")
+        if res.get("infra_error"):
+            rows.append("| Qwen3.5 score | infra error (not graded) |")
+            rows.append("| Qwen3.6 score | infra error (not graded) |")
+        else:
+            rows.append(f"| Qwen3.5 score | `eval-qwen35:{res.get('label_qwen35', '?')}` "
+                        f"({'pass' if res.get('pass_qwen35') else 'fail'}) |")
+            rows.append(f"| Qwen3.6 score | `eval-qwen36:{res.get('label_qwen36', '?')}` "
+                        f"({'pass' if res.get('pass_qwen36') else 'fail'}) |")
         for title, block in [("Qwen3.5", res.get("score_qwen35") or {}),
                              ("Qwen3.6", res.get("score_qwen36") or {})]:
+            if res.get("infra_error"):
+                continue
             if not block:
                 continue
             bctx = block.get("best_context_label")
@@ -1121,7 +1156,7 @@ def render(res, oid):
             rows.append(f"| legacy 2k no-regression gate | {res.get('ctx_2048_tps')} tok/s"
                         f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
     # The Qwen3-30B no-regression guard — the check that actually gates a dual verdict.
-    if bidir:
+    if bidir and not res.get("infra_error"):
         for title, block in [("Qwen3.5 optimize", res.get("score_qwen35") or {}),
                              ("Qwen3.6 optimize", res.get("score_qwen36") or {})]:
             if not block:
@@ -1195,7 +1230,9 @@ def render(res, oid):
     if label == "REJECT" and res.get("auto_close") and not res.get("infra_error"):
         note = "No context cleared the 2% significance gate while at least one context regressed. Auto-closing this PR."
     if res.get("infra_error") or str(res.get("reason") or "").startswith("infra error"):
-        note = "Infra failure during eval (not a verified PR regression) — re-run recommended."
+        reason = str(res.get("reason") or "infra error").removeprefix("infra error: ").strip()
+        note = ("Infra failure during eval (not a verified PR regression) — re-run recommended."
+                + (f"\n\n`{reason}`" if reason else ""))
     target_note = ("128/512/4k/16k/32k guarded · Qwen3.5 prefill at 4k/32k/64k/128k · "
                    "Qwen3.6 prefill at 128/512/4k/16k/32k · scored vs same-box main"
                    if res.get("eval_mode") == "longctx" and res.get("mode") == "bidir"
@@ -2162,8 +2199,8 @@ def main():
                     help="generate a Polaris verifiable receipt for each eval (default: on)")
     ap.add_argument("--no-polaris", action="store_true",
                     help="disable Polaris TDX receipts (overrides POLARIS=1)")
-    ap.add_argument("--only-pr", type=int, default=0,
-                    help="evaluate only this PR number (must be open)")
+    ap.add_argument("--only-pr", default="",
+                    help="evaluate only this PR number (comma-separated list ok, e.g. 531,511,530)")
     ap.add_argument("--only-prs", default="",
                     help="comma-separated PR numbers — one baseline, then eval each (e.g. 387,389)")
     ap.add_argument("--skip-baseline", action="store_true",
@@ -2462,14 +2499,20 @@ def main():
             QWEN36_BASE.update(cache["q36"])
             QWYTHOS_BASE.update(cache["q35"])
         bres = cache["bres"]
+        # Re-derive pp from bres so older caches that zeroed all q36 pp (128_pp=0 abort) self-heal.
+        if args.bidir and bres:
+            _apply_bidir_ctx_from_bres(bres, QWEN36_BASE, QWYTHOS_BASE)
         print(f">> reusing cached same-box baseline from {cache['ts']} ({box_id}, main={main_commit or '?'})")
     elif args.skip_baseline:
         print(f">> --skip-baseline: no valid cache for {box_id} — aborting")
         return
     else:
-        if cache and main_commit and (cache.get("bres") or {}).get("commit") not in (None, main_commit):
-            print(f">> baseline cache stale (cached main={(cache.get('bres') or {}).get('commit')} "
-                  f"!= origin/main={main_commit}) — remeasuring")
+        if cache and main_commit:
+            cached_commit = (cache.get("bres") or {}).get("commit")
+            if (cached_commit and cached_commit != main_commit
+                    and _bench_harness_changed_between(cached_commit, main_commit)):
+                print(f">> baseline cache stale (bench/scripts changed {cached_commit}..{main_commit}) "
+                      f"— remeasuring")
         bcmd = [sys.executable, os.path.join(HERE, "vast_eval.py"),
                 *_vast_eval_transport_args(args.instance),
                 "--ref", "origin/main", "--frontier", "0", "--ceiling", str(args.ceiling),
@@ -2611,7 +2654,9 @@ def main():
                     f"— re-run manually.\n\n<details><summary>log tail</summary>\n\n```\n{log}\n```\n</details>")
             res, label = None, None
         else:
-            res = json.loads(line[len("RESULT_JSON "):]); label = res["label"]; body = render(res, oid)
+            res = json.loads(line[len("RESULT_JSON "):])
+            label = _public_eval_label(res)
+            body = render(res, oid)
             print(f"PR #{num}: {json.dumps(res)}")
 
             # --- Polaris: parse unsigned attestation from eval box, attest it, upload with eval log ---
@@ -2640,14 +2685,27 @@ def main():
             print("--- dry-run, not posting ---\n" + body); continue
         if label:
             cur = labels_on(args.repo, num)
-            for lab in {l for l in cur if l.startswith("eval:") or l.startswith("eval-qwen")}:
+            for lab in {l for l in cur if l.startswith("eval:") or l.startswith("eval-qwen")
+                        or l.startswith("eval-prefill:")}:
                 remove_label(args.repo, num, lab)
             add_label(args.repo, num, f"eval:{label}")
-            if res and res.get("mode") == "bidir":
+            if res and res.get("mode") == "bidir" and not res.get("infra_error"):
                 if res.get("label_qwen35"):
                     add_label(args.repo, num, f"eval-qwen35:{res['label_qwen35']}")
                 if res.get("label_qwen36"):
                     add_label(args.repo, num, f"eval-qwen36:{res['label_qwen36']}")
+                # Annotate verified prefill progress even when headline is REJECT (correctness).
+                prefill_tiers = []
+                for block in (res.get("score_qwen35") or {}, res.get("score_qwen36") or {}, res):
+                    pl = block.get("prefill_label")
+                    if pl in SPEEDUP_LABELS:
+                        prefill_tiers.append(pl)
+                if prefill_tiers:
+                    best_pf = max(prefill_tiers, key=lambda t: (
+                        {"XL": 6, "L": 5, "M": 4, "S": 3, "XS": 2}.get(t, 0)))
+                    add_label(args.repo, num, f"eval-prefill:{best_pf}")
+            elif res and res.get("infra_error"):
+                add_label(args.repo, num, REEVALUATE_LABEL)
             apply_context_label(args.repo, num, cur, res.get("best_context_label"))
             apply_regression_labels(args.repo, num, cur, res.get("regression_labels"))
             # This was just graded against the CURRENT main, so it's no longer stale: clear

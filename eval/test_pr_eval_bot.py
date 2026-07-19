@@ -865,6 +865,33 @@ class PrEvalBotPolicyTest(unittest.TestCase):
         body = bot.render({"label": "S", "pass": True, "tps": 200.0, "top1": 1.0, "kl": 0.0}, "df74674")
         self.assertEqual(bot._evaluated_commit_from_comment(body), "df74674")
 
+    def test_infra_error_public_label_and_render(self):
+        res = {
+            "label": "REJECT", "pass": False, "infra_error": True, "mode": "bidir",
+            "reason": "infra error: accuracy check produced no METRIC (ModuleNotFoundError: No module named 'tokenizers')",
+            "score_qwen35": {"tps": 0, "top1": 0, "kl": 99, "label": "REJECT", "pass": False, "infra_error": True},
+            "score_qwen36": {"tps": 0, "top1": 0, "kl": 99, "label": "REJECT", "pass": False, "infra_error": True},
+            "label_qwen35": "REJECT", "label_qwen36": "REJECT",
+        }
+        self.assertEqual(bot._public_eval_label(res), "infra-error")
+        body = bot.render(res, "e2d829a")
+        self.assertIn("`eval:infra-error`", body)
+        self.assertIn("infra error (not graded)", body)
+        self.assertNotIn("eval-qwen35:REJECT", body)
+        self.assertNotIn("Qwen3.5 optimize", body)
+        self.assertIn("tokenizers", body)
+
+    def test_none_reject_eval_count_ignores_infra_error(self):
+        infra_body = bot.render({
+            "label": "REJECT", "pass": False, "infra_error": True, "mode": "bidir",
+            "reason": "infra error: missing tokenizers",
+            "score_qwen35": {}, "score_qwen36": {},
+        }, "abc1234")
+        comments = [{"body": infra_body}]
+        gh_mock = mock.Mock(return_value=mock.Mock(stdout=json.dumps({"comments": comments})))
+        with mock.patch.object(bot, "gh", gh_mock):
+            self.assertEqual(bot.none_reject_eval_count("gittensor-ai-lab/sparkinfer", 531), 0)
+
     def test_evaluated_commit_from_comment_rejects_error_marker(self):
         body = ("<!-- sparkinfer-eval:df74674 -->\n"
                 "⚠️ **sparkinfer auto-eval errored** for `df74674` — re-run manually.")
@@ -890,8 +917,37 @@ class PrEvalBotPolicyTest(unittest.TestCase):
 class OnlyPrsAndBaselineCacheTest(unittest.TestCase):
     def test_parse_only_prs(self):
         self.assertEqual(bot._parse_only_prs(387, ""), {387})
+        self.assertEqual(bot._parse_only_prs("531,511,530", ""), {531, 511, 530})
         self.assertEqual(bot._parse_only_prs(0, "387, 389"), {387, 389})
         self.assertEqual(bot._parse_only_prs(387, "389"), {387, 389})
+
+    def test_fill_pp_allows_partial_q36_when_128_pp_zero(self):
+        """Qwen3.6 baseline often has ctx_128_pp_tps=0; must still keep 512/4k/16k/32k pp."""
+        q36 = {"128_pp": 0.0, "512_pp": 0.0, "4k_pp": 0.0, "16k_pp": 0.0, "32k_pp": 0.0,
+               "128": 0, "512": 0, "4k": 0, "16k": 0, "32k": 0}
+        q35 = {"128": 0, "4k": 0, "32k": 0, "64k": 0,
+               "4k_pp": 0.0, "32k_pp": 0.0, "64k_pp": 0.0, "128k_pp": 0.0}
+        bres = {
+            "score_qwen36": {
+                "ctx_128_tps": 475.97, "ctx_512_tps": 469.85, "ctx_4096_tps": 450.96,
+                "ctx_16384_tps": 434.42, "ctx_32768_tps": 406.66,
+                "ctx_128_pp_tps": 0.0, "ctx_512_pp_tps": 534.53,
+                "ctx_4096_pp_tps": 521.72, "ctx_16384_pp_tps": 504.37,
+                "ctx_32768_pp_tps": 484.09,
+            },
+            "score_qwen35": {
+                "ctx_128_tps": 293.92, "ctx_4096_tps": 283.93,
+                "ctx_32768_tps": 282.28, "ctx_65536_tps": 282.28,
+                "ctx_4096_pp_tps": 15665.6, "ctx_32768_pp_tps": 17280.6,
+                "ctx_65536_pp_tps": 17432.4, "ctx_131072_pp_tps": 287.3,
+            },
+        }
+        self.assertTrue(bot._apply_bidir_ctx_from_bres(bres, q36, q35))
+        self.assertEqual(q36["128_pp"], 0.0)
+        self.assertAlmostEqual(q36["512_pp"], 534.53)
+        self.assertAlmostEqual(q36["4k_pp"], 521.72)
+        self.assertAlmostEqual(q36["32k_pp"], 484.09)
+        self.assertAlmostEqual(q35["4k_pp"], 15665.6)
 
     def test_baseline_cache_roundtrip(self):
         with tempfile.TemporaryDirectory() as td:
@@ -916,7 +972,21 @@ class OnlyPrsAndBaselineCacheTest(unittest.TestCase):
                           "score_qwen35": {"ctx_128_tps": 200, "ctx_4096_tps": 190,
                                            "ctx_32768_tps": 180, "ctx_65536_tps": 170}}}
         q36, q35 = {"128": 0}, {"128": 0}
-        self.assertFalse(bot._baseline_cache_valid(cache, True, q36, q35, "def5678"))
+        with mock.patch.object(bot, "_bench_harness_changed_between", return_value=True):
+            self.assertFalse(bot._baseline_cache_valid(cache, True, q36, q35, "def5678"))
+
+    def test_baseline_cache_valid_keeps_cache_when_only_eval_changed(self):
+        cache = {"bres": {"commit": "abc1234", "pass": True, "tps": 300.0,
+                          "score_qwen36": {"ctx_128_tps": 300, "ctx_512_tps": 290,
+                                           "ctx_4096_tps": 280, "ctx_16384_tps": 270,
+                                           "ctx_32768_tps": 260},
+                          "score_qwen35": {"ctx_128_tps": 200, "ctx_4096_tps": 190,
+                                           "ctx_32768_tps": 180, "ctx_65536_tps": 170,
+                                           "ctx_4096_pp_tps": 100, "ctx_32768_pp_tps": 90,
+                                           "ctx_65536_pp_tps": 80}}}
+        q36, q35 = {"128": 0}, {"128": 0}
+        with mock.patch.object(bot, "_bench_harness_changed_between", return_value=False):
+            self.assertTrue(bot._baseline_cache_valid(cache, True, q36, q35, "def5678"))
 
     def test_baseline_cache_valid_accepts_matching_main(self):
         bres = {
