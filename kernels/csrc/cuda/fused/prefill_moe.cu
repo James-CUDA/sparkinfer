@@ -27,8 +27,10 @@ __global__ void pfm_router_logits_kernel(const __nv_bfloat16* __restrict__ x,
                                          float* __restrict__ logits,
                                          int n_tokens, int n_experts, int H) {
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const int e = blockIdx.x * (blockDim.x >> 5) + warp;
-    const int t = blockIdx.y;
+    // tokens on grid.x (up to 2^31), expert-groups on grid.y (=32): grid.y = n_tokens would
+    // overflow CUDA's 65535 grid-dim limit at N >= 64k and silently fail to launch.
+    const int e = blockIdx.y * (blockDim.x >> 5) + warp;
+    const int t = blockIdx.x;
     if (e >= n_experts || t >= n_tokens) return;
     const __nv_bfloat16* xr = x + (size_t)t * H;
     const __nv_bfloat16* wr = W + (size_t)e * H;
@@ -228,7 +230,7 @@ __global__ void pfm_resid3_kernel(const __nv_bfloat16* __restrict__ h,
 
 void launch_pfm_router_logits(const void* x, const void* W, float* logits,
                               int n_tokens, int n_experts, int H, cudaStream_t stream) {
-    dim3 grid((n_experts + 7) / 8, n_tokens);
+    dim3 grid(n_tokens, (n_experts + 7) / 8);
     pfm_router_logits_kernel<<<grid, 8 * 32, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(x), reinterpret_cast<const __nv_bfloat16*>(W),
         logits, n_tokens, n_experts, H);
