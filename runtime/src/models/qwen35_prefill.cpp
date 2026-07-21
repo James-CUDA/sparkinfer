@@ -21,6 +21,7 @@
 #include "sparkinfer/kernels/moe.h"
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -459,8 +460,9 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
                 const size_t u_rb = q_row_bytes(w.up_qtype, H);
                 const size_t d_rb = q_row_bytes(w.down_qtype, mffn);
                 const int G = moe_group;
-                // Host tilemap for one group (worst case: every expert has pairs).
-                int h_tm[2 * 256];   // enough for G<=64 with several tiles each
+                // Host tilemap for one group. Worst case: all P pairs land in this group →
+                // ceil(P/bm)+G tiles (fragmentation). Fixed 2*256 overflowed (~288 @N=512).
+                std::vector<int> h_tm((size_t)2 * std::max(max_tiles, 1));
                 for (int base = 0; base < E; base += G) {
                     const int n_in = (E - base < G) ? (E - base) : G;
                     int ntm = 0, any = 0;
@@ -471,8 +473,9 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
                         any = 1;
                         const int nt = (cnt + moe_bm - 1) / moe_bm;
                         for (int mt = 0; mt < nt; mt++) {
-                            h_tm[2 * ntm] = e;
-                            h_tm[2 * ntm + 1] = mt;
+                            if (ntm >= max_tiles) break;
+                            h_tm[(size_t)2 * ntm] = e;
+                            h_tm[(size_t)2 * ntm + 1] = mt;
                             ntm++;
                         }
                     }
@@ -481,7 +484,7 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
                     const void* ue = (const char*)w.up_q   + (size_t)base * (size_t)mffn * u_rb;
                     kernels::launch_gguf_dequant_rows_i8(w.gate_qtype, ge, Wg_i8, swg, n_in * mffn, H, st);
                     kernels::launch_gguf_dequant_rows_i8(w.up_qtype,   ue, Wu_i8, swu, n_in * mffn, H, st);
-                    pf_cu(cudaMemcpyAsync(tilemap, h_tm, (size_t)2 * ntm * sizeof(int),
+                    pf_cu(cudaMemcpyAsync(tilemap, h_tm.data(), (size_t)2 * ntm * sizeof(int),
                                           cudaMemcpyHostToDevice, st), "moe group tilemap");
                     pf_cu(cudaMemcpyAsync(d_ntiles, &ntm, sizeof(int),
                                           cudaMemcpyHostToDevice, st), "moe group ntiles");
@@ -506,15 +509,16 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
                         any = 1;
                         const int nt = (cnt + moe_bm - 1) / moe_bm;
                         for (int mt = 0; mt < nt; mt++) {
-                            h_tm[2 * ntm] = e;
-                            h_tm[2 * ntm + 1] = mt;
+                            if (ntm >= max_tiles) break;
+                            h_tm[(size_t)2 * ntm] = e;
+                            h_tm[(size_t)2 * ntm + 1] = mt;
                             ntm++;
                         }
                     }
                     if (!any) continue;
                     const void* de = (const char*)w.down_q + (size_t)base * (size_t)H * d_rb;
                     kernels::launch_gguf_dequant_rows_i8(w.down_qtype, de, Wd_i8, swd, n_in * H, mffn, st);
-                    pf_cu(cudaMemcpyAsync(tilemap, h_tm, (size_t)2 * ntm * sizeof(int),
+                    pf_cu(cudaMemcpyAsync(tilemap, h_tm.data(), (size_t)2 * ntm * sizeof(int),
                                           cudaMemcpyHostToDevice, st), "moe down tilemap");
                     pf_cu(cudaMemcpyAsync(d_ntiles, &ntm, sizeof(int),
                                           cudaMemcpyHostToDevice, st), "moe down ntiles");
