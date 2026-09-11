@@ -1839,7 +1839,11 @@ static inline bool launch_down_q4k_mmvq_splitk_rows(
     const float* expert_weights, const si_block_q8_1* hq8, __nv_bfloat16* output,
     int H, int F, int top_k, cudaStream_t stream
 ) {
-    if (M < 2 || M > 8) return false;
+    // Only exactly-instantiated widths: the kernel processes M rows unconditionally, so a width it
+    // was not built for would read past the batch. 16 and 32 are the concurrency points the
+    // continuous-batch axes score; everything between still takes the per-token grid below.
+    if (M < 2) return false;
+    if (M > 8 && M != 16 && M != 32) return false;
     const dim3 block(WPB * 32);
 #define SI_DOWN_ROWS(S_, M_) do { \
         launch_mmvq_down_kernel(pdl, grid, block, stream, down_q4k_mmvq_splitk_rows_kernel<S_, M_>, \
@@ -1851,6 +1855,7 @@ static inline bool launch_down_q4k_mmvq_splitk_rows(
             case 2: SI_DOWN_ROWS(S_, 2); case 3: SI_DOWN_ROWS(S_, 3); \
             case 4: SI_DOWN_ROWS(S_, 4); case 5: SI_DOWN_ROWS(S_, 5); \
             case 6: SI_DOWN_ROWS(S_, 6); case 7: SI_DOWN_ROWS(S_, 7); \
+            case 16: SI_DOWN_ROWS(S_, 16); case 32: SI_DOWN_ROWS(S_, 32); \
             default: SI_DOWN_ROWS(S_, 8); \
         } \
     } while (0)
@@ -2336,7 +2341,20 @@ void launch_moe_expert_ffn_q4k(
             // down_q4k_mmvq_splitk_rows_kernel. SPARKINFER_DOWN_ROWS=0 restores the per-token grid.
             static int down_rows = -1;
             if (down_rows < 0) { const char* e = getenv("SPARKINFER_DOWN_ROWS"); down_rows = (e && e[0] == '0') ? 0 : 1; }
-            if (down_rows && num_tokens >= 2 && num_tokens <= 8 && top_k == 1) {
+            // Widest batch that reads the down projection ONCE. The cap was 8; above it the grid
+            // below puts the token on blockIdx.x, so ffn_down is re-read per row -- ~3.4 GB per
+            // step on Muse Glimmer, which is ~110 GB at 32 rows and is why aggregate throughput
+            // stops rising past concurrency 8. gate/up already avoid this (their NVFP4 GEMM reads
+            // its operand once at any width); down is the projection left paying per row, because
+            // its FP4 copy is the 3.9 GB the card has nowhere to put.
+            // SPARKINFER_DOWN_ROWS_MAX=8 restores the previous ceiling for an A/B in ONE binary.
+            static int down_rows_max = -1;
+            if (down_rows_max < 0) {
+                const char* e = getenv("SPARKINFER_DOWN_ROWS_MAX");
+                const int v = e ? atoi(e) : 32;
+                down_rows_max = v < 2 ? 2 : v;
+            }
+            if (down_rows && num_tokens >= 2 && num_tokens <= down_rows_max && top_k == 1) {
                 dim3 dnr(1, (hidden + RPB - 1) / RPB);
                 if (launch_down_q4k_mmvq_splitk_rows(S, num_tokens, pdl, dnr,
                         reinterpret_cast<const unsigned char*>(down_q), expert_ids, expert_weights, hq8,
