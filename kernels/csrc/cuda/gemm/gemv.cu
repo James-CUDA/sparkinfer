@@ -4450,10 +4450,15 @@ bool launch_mmvq_rows(int qtype, const void* q81, const void* W, void* y,
     // N is the block count: at N=32 per block, k and v (N=256 on this checkpoint) would launch
     // eight blocks onto 170 SMs and the per-launch cost swamps the saved weight reads. Only the
     // wide projections -- q and the attention output -- have enough work to fill the device.
+    // 1024, not 2048: a 1024-row projection is 32 blocks, and with the K split below that is 256 --
+    // enough to fill the device at packed widths. Qwen3.8's compressed-tensors checkpoint loads its
+    // attention k and v (4 kv heads x 256) as Q4_K, and at 16-32 rows they were paying 4-8 chunked
+    // MMVQ launches each per layer: measured on the continuous-batch step, c16 782.6 -> 804.6 and
+    // c32 1112.2 -> 1150.7 tok/s. The 256-row k/v the note above describes stays below the floor.
     static int mmvq_mma_minn = -1;
     if (mmvq_mma_minn < 0) {
         const char* e = getenv("SPARKINFER_MMVQ_MMA_MINN");
-        mmvq_mma_minn = e ? atoi(e) : 2048;
+        mmvq_mma_minn = e ? atoi(e) : 1024;
     }
     // Eight rows, because the floor is about weight traffic rather than arithmetic: the chunked
     // MMVQ below reads the weights once per eight rows, so at or under eight it already reads them
@@ -4463,8 +4468,31 @@ bool launch_mmvq_rows(int qtype, const void* q81, const void* W, void* y,
         const char* e = getenv("SPARKINFER_MMVQ_MMA_MINM");
         mmvq_mma_minm = e ? atoi(e) : 8;
     }
-    if (mmvq_mma && M >= mmvq_mma_minm && qtype == 12 && N >= mmvq_mma_minn &&
-        launch_mmvq_q4k_mma_rows(q81, W, y, M, N, K, stream)) return true;
+    if (mmvq_mma && M >= mmvq_mma_minm && qtype == 12 && N >= mmvq_mma_minn) {
+        if (launch_mmvq_q4k_mma_rows(q81, W, y, M, N, K, stream)) return true;
+        // A batch whose M*N outgrows the split-K accumulator slot (SI_AM_MMAX x 6656 floats) used to
+        // drop all the way to the eight-row MMVQ chunks below -- four launches per layer for a 12288-
+        // row q|gate at 32 rows. Chunk at the widest width that still fits instead; each chunk is
+        // the same tensor-core kernel over its own rows. SPARKINFER_MMVQ_MMA_CHUNK=0 restores the
+        // eight-row fallback.
+        static const bool mma_chunk = [] {
+            const char* e = getenv("SPARKINFER_MMVQ_MMA_CHUNK");
+            return !(e && e[0] == '0');
+        }();
+        const int mc = (int)(((size_t)SI_AM_MMAX * 6656u) / (size_t)N) & ~7;
+        if (mma_chunk && (size_t)M * (size_t)N > (size_t)SI_AM_MMAX * 6656u &&
+            mc >= mmvq_mma_minm && mc < M && !(K & 255) && !(N % SI_AM_BN)) {
+            for (int r0 = 0; r0 < M; r0 += mc) {
+                const int m = (M - r0) < mc ? (M - r0) : mc;
+                if (!launch_mmvq_rows(qtype,
+                                      reinterpret_cast<const si_block_q8_1*>(q81)
+                                          + (size_t)r0 * (size_t)(K >> 5),
+                                      W, reinterpret_cast<__nv_bfloat16*>(y) + (size_t)r0 * N,
+                                      m, N, K, stream)) return false;
+            }
+            return true;
+        }
+    }
     if (M > 8) {
         for (int r0 = 0; r0 < M; r0 += 8) {
             const int m = (M - r0) < 8 ? (M - r0) : 8;
